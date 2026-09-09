@@ -1,0 +1,19 @@
+# Local build and packaging output
+/build/
+/dist/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/compile_commands.json
+
+# Generated binaries and Wayland protocol output
+/netdisplay-client
+/netdisplay-server
+/sender
+/receiver
+/receiver_v2
+/receiver_v3
+/screencopy.c
+/screencopy.h
+*.o
+

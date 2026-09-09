@@ -1,0 +1,13 @@
+[Unit]
+Description=NetDisplay integrated source server
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/netdisplay-server %h/.config/netdisplay/server.conf
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target

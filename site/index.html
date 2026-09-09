@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+BASE=${NETDISPLAY_BASE_URL:-https://nd.myc.li}
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/netdisplay.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+say() { printf 'netdisplay: %s\n' "$*" >&2; }
+fail() { say "$*"; exit 1; }
+get() { curl -fsSL --retry 2 --connect-timeout 5 "$1" -o "$2"; }
+
+command -v curl >/dev/null 2>&1 || fail "curl is required"
+
+case "$(uname -m)" in
+    x86_64|amd64) ARCH=x86_64 ;;
+    aarch64|arm64) ARCH=aarch64 ;;
+    *) ARCH=$(uname -m) ;;
+esac
+
+BIN="$TMP/netdisplay-client"
+say "trying prebuilt client for $ARCH"
+if get "$BASE/netdisplay-client-$ARCH" "$BIN" 2>/dev/null; then
+    chmod +x "$BIN"
+    if "$BIN" --version >/dev/null 2>&1; then
+        say "prebuilt works; starting"
+        trap - EXIT HUP INT TERM
+        exec "$BIN" "$@"
+    fi
+    say "prebuilt is not compatible; building the distributed C source"
+else
+    say "no prebuilt for $ARCH; building the distributed C source"
+fi
+
+for x in cmake cc pkg-config tar; do
+    command -v "$x" >/dev/null 2>&1 || fail "source fallback needs: cmake, cc, pkg-config, tar"
+done
+pkg-config --exists libdrm libavcodec libavutil libva libva-drm || fail \
+    "source fallback needs development packages for libdrm, libavcodec, libavutil and libva"
+
+SRC="$TMP/source.tar.gz"
+get "$BASE/source.tar.gz" "$SRC" || fail "cannot download source.tar.gz"
+mkdir "$TMP/src"
+tar -xzf "$SRC" -C "$TMP/src"
+cmake -S "$TMP/src" -B "$TMP/build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DNETDISPLAY_BUILD_SERVER=OFF \
+    -DNETDISPLAY_BUILD_CLIENT=ON
+cmake --build "$TMP/build" --target netdisplay-client -j"${NETDISPLAY_JOBS:-2}"
+
+say "local build succeeded; starting"
+trap - EXIT HUP INT TERM
+exec "$TMP/build/netdisplay-client" "$@"

@@ -1,0 +1,17 @@
+# Portable receiver defaults. The file is optional: running netdisplay-client
+# with no arguments uses these defaults even when no config exists.
+host=auto
+port=5001
+
+# Optional. Blank = discover on every active non-loopback IPv4 broadcast NIC.
+# Discovery uses 255.255.255.255 and one SO_BINDTODEVICE socket per NIC.
+interface=
+
+# Blank = auto. Override only on unusual multi-GPU systems.
+drm_device=
+vaapi_device=
+
+# Input is sent only when BOTH this request and server input_enabled=1 are true.
+want_input=1
+grab_input=0
+reconnect_ms=500

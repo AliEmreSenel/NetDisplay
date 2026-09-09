@@ -1,0 +1,11 @@
+[Unit]
+Description=NetDisplay receiver client
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/netdisplay-client
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target
