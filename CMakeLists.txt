@@ -24,6 +24,7 @@ if(NETDISPLAY_BUILD_SERVER)
     find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
     pkg_get_variable(WLR_DATADIR wlr-protocols pkgdatadir)
     set(SC_XML "${WLR_DATADIR}/unstable/wlr-screencopy-unstable-v1.xml")
+    set(OP_XML "${WLR_DATADIR}/unstable/wlr-output-power-management-unstable-v1.xml")
 
     add_custom_command(
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/screencopy.h"
@@ -31,15 +32,27 @@ if(NETDISPLAY_BUILD_SERVER)
                 "${CMAKE_CURRENT_BINARY_DIR}/screencopy.h"
         DEPENDS "${SC_XML}")
     add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/output-power.h"
+        COMMAND "${WAYLAND_SCANNER}" client-header "${OP_XML}"
+                "${CMAKE_CURRENT_BINARY_DIR}/output-power.h"
+        DEPENDS "${OP_XML}")
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/output-power.c"
+        COMMAND "${WAYLAND_SCANNER}" private-code "${OP_XML}"
+                "${CMAKE_CURRENT_BINARY_DIR}/output-power.c"
+        DEPENDS "${OP_XML}")
+    add_custom_command(
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/screencopy.c"
         COMMAND "${WAYLAND_SCANNER}" private-code "${SC_XML}"
                 "${CMAKE_CURRENT_BINARY_DIR}/screencopy.c"
         DEPENDS "${SC_XML}")
 
     add_executable(netdisplay-server
-        server.c video_sender.c
+        server.c display_state.c video_sender.c
         "${CMAKE_CURRENT_BINARY_DIR}/screencopy.c"
-        "${CMAKE_CURRENT_BINARY_DIR}/screencopy.h")
+        "${CMAKE_CURRENT_BINARY_DIR}/screencopy.h"
+        "${CMAKE_CURRENT_BINARY_DIR}/output-power.c"
+        "${CMAKE_CURRENT_BINARY_DIR}/output-power.h")
     target_include_directories(netdisplay-server PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(netdisplay-server PRIVATE
@@ -52,7 +65,8 @@ if(NETDISPLAY_BUILD_CLIENT)
     pkg_check_modules(LIBVA REQUIRED IMPORTED_TARGET libva libva-drm)
     add_executable(netdisplay-client client.c video_receiver.c)
     target_include_directories(netdisplay-client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(netdisplay-client PRIVATE nd_flags Threads::Threads)
+    target_link_libraries(netdisplay-client PRIVATE
+        nd_flags Threads::Threads ${CMAKE_DL_LIBS})
 
     if(NETDISPLAY_STATIC_CLIENT_PREFIX)
         find_path(ND_AV_INCLUDE libavcodec/avcodec.h

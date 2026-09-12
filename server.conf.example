@@ -1,11 +1,17 @@
-# Victus / source. One daemon, one built-in video sender.
+# Source. One daemon, one built-in video sender.
 listen=0.0.0.0
 port=5001
 video_port=5000
 allowed_peer=
 
 # The output name created by connect_cmd and captured by the built-in sender.
-output=T490
+output=netdisplay
+# Physical host output whose DPMS state is mirrored. Blank selects the first
+# non-NetDisplay Wayland output.
+source_output=
+# Host backlight name from /sys/class/backlight, an absolute directory, auto,
+# or none. Changes are pushed immediately over the control connection.
+brightness_device=auto
 width=1920
 height=1080
 refresh_hz=60
@@ -17,5 +23,8 @@ input_enabled=0
 # LOCAL lifecycle hooks only. The network protocol has no command/string field.
 # Environment: ND_PEER_IP ND_OUTPUT ND_VIDEO_PORT ND_CONTROL_PORT
 #              ND_WIDTH ND_HEIGHT ND_REFRESH_HZ
-connect_cmd=hyprctl output create headless "$ND_OUTPUT"; hyprctl keyword monitor "$ND_OUTPUT,${ND_WIDTH}x${ND_HEIGHT}@${ND_REFRESH_HZ},auto-right,1"
+# Hyprland's current live configuration API is Lua.  `output` still creates
+# the headless connector; `eval` applies its monitor rule.  Keep output names
+# to ordinary identifier characters if changing this command.
+connect_cmd=hyprctl output create headless "$ND_OUTPUT"; hyprctl eval "hl.monitor({ output = '$ND_OUTPUT', mode = '${ND_WIDTH}x${ND_HEIGHT}@${ND_REFRESH_HZ}', position = 'auto', scale = 1 })"
 disconnect_cmd=hyprctl output remove "$ND_OUTPUT"

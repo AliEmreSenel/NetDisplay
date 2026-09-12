@@ -10,6 +10,7 @@
 #include <stdatomic.h>
 #include <sys/ioctl.h>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <spawn.h>
 #include "proto.h"
 #include "video_receiver.h"
@@ -27,6 +28,7 @@ struct client_cfg {
     char interface[IFNAMSIZ];
     char drm_device[128];
     char vaapi_device[128];
+    char backlight_device[256];
     int port;
     int want_input;
     int grab_input;
@@ -55,6 +57,7 @@ static void cfg_defaults(struct client_cfg *c)
     c->want_input = 1;
     c->grab_input = 0;
     c->reconnect_ms = 500;
+    snprintf(c->backlight_device, sizeof(c->backlight_device), "auto");
     /* Empty means auto-detect. This is important for the portable receiver: the
      * KMS card number and VAAPI render node are not stable across laptops. */
     c->drm_device[0] = 0;
@@ -86,6 +89,7 @@ static void load_cfg(const char *path, struct client_cfg *c, int required)
         else if (!strcmp(k, "reconnect_ms")) c->reconnect_ms = atoi(v);
         else if (!strcmp(k, "drm_device")) snprintf(c->drm_device, sizeof(c->drm_device), "%s", v);
         else if (!strcmp(k, "vaapi_device")) snprintf(c->vaapi_device, sizeof(c->vaapi_device), "%s", v);
+        else if (!strcmp(k, "backlight_device")) snprintf(c->backlight_device, sizeof(c->backlight_device), "%s", v);
     }
     fclose(f);
     if (!c->host[0] || c->port <= 0 || c->port > 65535) {
@@ -494,17 +498,176 @@ done:
 }
 
 
+static int find_client_backlight(const char *setting, char *dir, size_t dirsz)
+{
+    if (!setting[0] || !strcmp(setting, "none")) return -1;
+    if (strcmp(setting, "auto")) {
+        if (setting[0] == '/') snprintf(dir, dirsz, "%s", setting);
+        else snprintf(dir, dirsz, "/sys/class/backlight/%s", setting);
+        return 0;
+    }
+    glob_t g;
+    if (glob("/sys/class/backlight/*", 0, NULL, &g) != 0 || !g.gl_pathc)
+        return -1;
+    snprintf(dir, dirsz, "%s", g.gl_pathv[0]);
+    globfree(&g);
+    return 0;
+}
+
+static int read_ulong_file(const char *path, unsigned long *value)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    int rc = fscanf(f, "%lu", value) == 1 ? 0 : -1;
+    fclose(f);
+    return rc;
+}
+
+/* Backlight files are deliberately not writable by ordinary users on many
+ * distributions.  logind exposes this narrowly-scoped operation to the active
+ * local session, which is also how desktop environments change brightness
+ * without a privileged helper.  Resolve libsystemd at runtime so the portable
+ * client does not gain a build-time or ELF dependency on it. */
+struct sd_bus;
+struct sd_bus_message;
+
+struct logind_api {
+    int initialized;
+    void *library;
+    int (*default_system)(struct sd_bus **bus);
+    int (*call_method)(struct sd_bus *bus, const char *destination,
+                       const char *path, const char *interface,
+                       const char *member, void *error,
+                       struct sd_bus_message **reply,
+                       const char *types, ...);
+    struct sd_bus_message *(*message_unref)(struct sd_bus_message *message);
+    struct sd_bus *(*bus_unref)(struct sd_bus *bus);
+};
+
+static int load_logind_symbol(void *library, const char *name,
+                              void *target, size_t target_size)
+{
+    void *symbol = dlsym(library, name);
+    if (!symbol || target_size != sizeof(symbol)) return -1;
+    memcpy(target, &symbol, sizeof(symbol));
+    return 0;
+}
+
+static int logind_set_backlight(const char *name, unsigned long value)
+{
+    static struct logind_api api;
+    if (!api.initialized) {
+        api.initialized = 1;
+        api.library = dlopen("libsystemd.so.0", RTLD_NOW | RTLD_LOCAL);
+        if (!api.library ||
+            load_logind_symbol(api.library, "sd_bus_default_system",
+                               &api.default_system,
+                               sizeof(api.default_system)) < 0 ||
+            load_logind_symbol(api.library, "sd_bus_call_method",
+                               &api.call_method, sizeof(api.call_method)) < 0 ||
+            load_logind_symbol(api.library, "sd_bus_message_unref",
+                               &api.message_unref,
+                               sizeof(api.message_unref)) < 0 ||
+            load_logind_symbol(api.library, "sd_bus_unref",
+                               &api.bus_unref, sizeof(api.bus_unref)) < 0) {
+            if (api.library) dlclose(api.library);
+            api.library = NULL;
+        }
+    }
+    if (!api.library || value > UINT32_MAX) return -ENOSYS;
+
+    struct sd_bus *bus = NULL;
+    struct sd_bus_message *reply = NULL;
+    int r = api.default_system(&bus);
+    if (r >= 0) {
+        r = api.call_method(bus, "org.freedesktop.login1",
+                            "/org/freedesktop/login1/session/auto",
+                            "org.freedesktop.login1.Session",
+                            "SetBrightness", NULL, &reply, "ssu",
+                            "backlight", name, (uint32_t)value);
+    }
+    api.message_unref(reply);
+    api.bus_unref(bus);
+    return r;
+}
+
+static void apply_backlight(const struct client_cfg *cfg, uint32_t percent)
+{
+    static int initialized;
+    static int available;
+    static unsigned long maximum;
+    static char brightness[512];
+    static char device[384];
+    if (!initialized) {
+        char dir[384], max_path[512];
+        initialized = 1;
+        if (find_client_backlight(cfg->backlight_device, dir, sizeof(dir)) < 0) {
+            if (strcmp(cfg->backlight_device, "none"))
+                fprintf(stderr,
+                        "receiver brightness unavailable: no backlight device\n");
+            return;
+        }
+        const char *base = strrchr(dir, '/');
+        snprintf(device, sizeof(device), "%s", base ? base + 1 : dir);
+        snprintf(brightness, sizeof(brightness), "%s/brightness", dir);
+        snprintf(max_path, sizeof(max_path), "%s/max_brightness", dir);
+        if (read_ulong_file(max_path, &maximum) < 0 || !maximum) {
+            fprintf(stderr, "cannot read receiver backlight maximum from %s\n",
+                    max_path);
+            return;
+        }
+        available = 1;
+    }
+    if (!available) return;
+    if (percent > 10000u) percent = 10000u;
+    unsigned long value = (unsigned long)(((uint64_t)maximum * percent + 5000u) /
+                                          10000u);
+    int fd = open(brightness, O_WRONLY | O_CLOEXEC);
+    int direct_error = 0;
+    if (fd >= 0) {
+        char b[32];
+        int len = snprintf(b, sizeof(b), "%lu\n", value);
+        ssize_t wr;
+        do { wr = write(fd, b, (size_t)len); } while (wr < 0 && errno == EINTR);
+        if (wr != len) direct_error = wr < 0 ? errno : EIO;
+        close(fd);
+        if (!direct_error) {
+            fprintf(stderr, "receiver brightness: %.2f%% via %s\n",
+                    (double)percent / 100.0, brightness);
+            return;
+        }
+    } else {
+        direct_error = errno;
+    }
+
+    int r = logind_set_backlight(device, value);
+    if (r >= 0) {
+        fprintf(stderr, "receiver brightness: %.2f%% via logind (%s)\n",
+                (double)percent / 100.0, device);
+        return;
+    }
+    fprintf(stderr,
+            "cannot set receiver backlight %s: direct write: %s; logind: %s\n",
+            brightness, strerror(direct_error), strerror(-r));
+}
+
 static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int video_port,
                                     int width, int height, int refresh_hz,
-                                    const char *ifname, int *ready_fd)
+                                    const char *ifname, int *ready_fd,
+                                    int *state_fd)
 {
-    int pfd[2];
+    int pfd[2], state_pipe[2];
     if (pipe2(pfd, O_CLOEXEC) < 0) return -1;
+    if (pipe2(state_pipe, O_CLOEXEC) < 0) {
+        close(pfd[0]); close(pfd[1]);
+        return -1;
+    }
 
-    enum { CHILD_READY_FD = 198 };
-    char portbuf[16], readybuf[16], widthbuf[16], heightbuf[16], refreshbuf[16];
+    enum { CHILD_READY_FD = 198, CHILD_STATE_FD = 199 };
+    char portbuf[16], readybuf[16], statebuf[16], widthbuf[16], heightbuf[16], refreshbuf[16];
     snprintf(portbuf, sizeof(portbuf), "%d", video_port);
     snprintf(readybuf, sizeof(readybuf), "%d", CHILD_READY_FD);
+    snprintf(statebuf, sizeof(statebuf), "%d", CHILD_STATE_FD);
     snprintf(widthbuf, sizeof(widthbuf), "%d", width);
     snprintf(heightbuf, sizeof(heightbuf), "%d", height);
     snprintf(refreshbuf, sizeof(refreshbuf), "%d", refresh_hz);
@@ -519,6 +682,7 @@ static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int video_port
         widthbuf,
         heightbuf,
         refreshbuf,
+        statebuf,
         NULL,
     };
 
@@ -532,6 +696,12 @@ static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int video_port
     if (e != 0) goto fail;
     e = posix_spawn_file_actions_addclose(&fa, pfd[1]);
     if (e != 0) goto fail;
+    e = posix_spawn_file_actions_adddup2(&fa, state_pipe[0], CHILD_STATE_FD);
+    if (e != 0) goto fail;
+    e = posix_spawn_file_actions_addclose(&fa, state_pipe[0]);
+    if (e != 0) goto fail;
+    e = posix_spawn_file_actions_addclose(&fa, state_pipe[1]);
+    if (e != 0) goto fail;
 
     e = posix_spawnattr_init(&attr);
     if (e != 0) goto fail;
@@ -544,18 +714,22 @@ static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int video_port
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&fa);
     close(pfd[1]);
+    close(state_pipe[0]);
     if (e != 0) {
         close(pfd[0]);
+        close(state_pipe[1]);
         errno = e;
         return -1;
     }
     *ready_fd = pfd[0];
+    *state_fd = state_pipe[1];
     return p;
 
 fail:
     posix_spawn_file_actions_destroy(&fa);
 fail_no_fa:
     close(pfd[0]); close(pfd[1]);
+    close(state_pipe[0]); close(state_pipe[1]);
     errno = e;
     return -1;
 }
@@ -582,19 +756,20 @@ static int wait_receiver_ready(pid_t pid, int fd, int timeout_ms)
 
 int main(int argc, char **argv)
 {
+    signal(SIGPIPE, SIG_IGN);
     self_program = argv[0];
     if (argc == 2 && (!strcmp(argv[1], "--version") || !strcmp(argv[1], "-V"))) {
         printf("netdisplay-client %s protocol=%u video=runtime-negotiated\n",
                NETDISPLAY_VERSION, NDC_VERSION);
         return 0;
     }
-    if (argc == 10 && !strcmp(argv[1], "--video-receiver"))
+    if (argc == 11 && !strcmp(argv[1], "--video-receiver"))
         return nd_video_receiver_run(atoi(argv[2]),
                                      argv[3][0] ? argv[3] : NULL,
                                      argv[4][0] ? argv[4] : NULL,
                                      argv[5][0] ? argv[5] : NULL,
                                      atoi(argv[6]), atoi(argv[7]),
-                                     atoi(argv[8]), atoi(argv[9]));
+                                     atoi(argv[8]), atoi(argv[9]), atoi(argv[10]));
 
     if (argc > 2) {
         fprintf(stderr, "usage: %s [CLIENT_CONFIG]\n", argv[0]);
@@ -677,18 +852,21 @@ int main(int argc, char **argv)
                 discovered_if[0] ? discovered_if : "route",
                 input_allowed ? "allowed" : "off");
 
-        int ready_fd = -1;
+        int ready_fd = -1, state_fd = -1;
         pid_t video_pid = spawn_builtin_receiver(&cfg, video_port, width, height,
-                                                 refresh_hz, discovered_if, &ready_fd);
+                                                 refresh_hz, discovered_if,
+                                                 &ready_fd, &state_fd);
         if (video_pid < 0) {
             perror("fork built-in video receiver");
             close(s);
+            if (state_fd >= 0) close(state_fd);
             usleep((useconds_t)cfg.reconnect_ms * 1000u);
             continue;
         }
         if (wait_receiver_ready(video_pid, ready_fd, 10000) < 0) {
             fprintf(stderr, "video receiver failed to initialize: %s\n", strerror(errno));
             close(ready_fd);
+            close(state_fd);
             ndc_stop_child(&video_pid);
             close(s);
             usleep((useconds_t)cfg.reconnect_ms * 1000u);
@@ -699,6 +877,7 @@ int main(int argc, char **argv)
 
         if (ndc_send_msg(s, NDC_READY, NULL, 0) < 0) {
             ndc_stop_child(&video_pid);
+            close(state_fd);
             close(s);
             continue;
         }
@@ -761,6 +940,20 @@ int main(int argc, char **argv)
                 /* heartbeat reply */
             } else if (bt == NDC_STOP && bl == 0) {
                 break;
+            } else if (bt == NDC_DISPLAY_STATE &&
+                       bl == sizeof(struct ndc_display_state)) {
+                struct ndc_display_state state;
+                memcpy(&state, b, sizeof(state));
+                uint32_t flags = ntohl(state.flags);
+                uint32_t brightness = ntohl(state.brightness);
+                if (flags & NDC_DISPLAY_HAS_BRIGHTNESS)
+                    apply_backlight(&cfg, brightness);
+                if (flags & NDC_DISPLAY_HAS_DPMS) {
+                    ssize_t wr;
+                    do { wr = write(state_fd, &state, sizeof(state)); }
+                    while (wr < 0 && errno == EINTR);
+                    if (wr != (ssize_t)sizeof(state)) break;
+                }
             } else {
                 fprintf(stderr, "protocol violation from source: message type %u\n", bt);
                 break;
@@ -771,6 +964,7 @@ int main(int argc, char **argv)
         shutdown(s, SHUT_RDWR);
         if (have_it) pthread_join(it, NULL);
         close(s);
+        close(state_fd);
         ndc_stop_child(&video_pid);
         fprintf(stderr, "source disconnected; discovering again\n");
         usleep((useconds_t)cfg.reconnect_ms * 1000u);

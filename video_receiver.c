@@ -26,6 +26,7 @@
 #include <libavutil/pixdesc.h>
 
 #include "proto.h"
+#include "common.h"
 #include "video_receiver.h"
 
 struct dumb_fb {
@@ -278,6 +279,105 @@ static int set_plane_property(int fd, uint32_t plane_id, const char *name,
                                  prop_id, value) != 0)
         return -1;
     return 1;
+}
+
+static int connector_property_id(int fd, uint32_t connector_id,
+                                 const char *name, uint32_t *prop_id)
+{
+    drmModeObjectProperties *ops =
+        drmModeObjectGetProperties(fd, connector_id, DRM_MODE_OBJECT_CONNECTOR);
+    if (!ops) return 0;
+    int found = 0;
+    for (uint32_t i = 0; i < ops->count_props; i++) {
+        drmModePropertyRes *pr = drmModeGetProperty(fd, ops->props[i]);
+        if (!pr) continue;
+        if (!strcmp(pr->name, name)) {
+            *prop_id = pr->prop_id;
+            found = 1;
+            drmModeFreeProperty(pr);
+            break;
+        }
+        drmModeFreeProperty(pr);
+    }
+    drmModeFreeObjectProperties(ops);
+    return found;
+}
+
+struct drm_display_control {
+    pthread_mutex_t mutex;
+    int fd;
+    int state_fd;
+    uint32_t connector_id;
+    uint32_t crtc_id;
+    uint32_t plane_id;
+    uint32_t black_fb;
+    struct dumb_fb *video;
+    drmModeModeInfo mode;
+    uint32_t stream_width;
+    uint32_t stream_height;
+    int front;
+    int dpms_on;
+};
+
+static int set_connector_dpms(struct drm_display_control *c, int on)
+{
+    uint32_t prop_id;
+    if (!connector_property_id(c->fd, c->connector_id, "DPMS", &prop_id))
+        return 0;
+    uint64_t value = on ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF;
+    if (drmModeConnectorSetProperty(c->fd, c->connector_id,
+                                    prop_id, value) != 0)
+        return -1;
+    return 1;
+}
+
+static void apply_dpms(struct drm_display_control *c, int on)
+{
+    pthread_mutex_lock(&c->mutex);
+    if (on == c->dpms_on) {
+        pthread_mutex_unlock(&c->mutex);
+        return;
+    }
+    int property = set_connector_dpms(c, on);
+    if (property < 0)
+        perror("DRM connector DPMS");
+    if (property <= 0) {
+        if (!on) {
+            if (drmModeSetCrtc(c->fd, c->crtc_id, 0, 0, 0,
+                               NULL, 0, NULL) != 0)
+                perror("DRM DPMS-off modeset");
+        } else {
+            uint32_t connector = c->connector_id;
+            if (drmModeSetCrtc(c->fd, c->crtc_id, c->black_fb, 0, 0,
+                               &connector, 1, &c->mode) != 0) {
+                perror("DRM DPMS-on modeset");
+            } else if (drmModeSetPlane(c->fd, c->plane_id, c->crtc_id,
+                                       c->video[c->front].fb_id, 0,
+                                       0, 0, c->mode.hdisplay,
+                                       c->mode.vdisplay, 0, 0,
+                                       c->stream_width << 16,
+                                       c->stream_height << 16) != 0) {
+                perror("DRM DPMS-on plane restore");
+            }
+        }
+    }
+    c->dpms_on = on;
+    fprintf(stderr, "receiver DPMS: %s\n", on ? "on" : "off");
+    pthread_mutex_unlock(&c->mutex);
+}
+
+static void *display_control_thread(void *opaque)
+{
+    struct drm_display_control *c = opaque;
+    for (;;) {
+        struct ndc_display_state state;
+        int r = ndc_read_full(c->state_fd, &state, sizeof(state));
+        if (r <= 0) break;
+        uint32_t flags = ntohl(state.flags);
+        if (flags & NDC_DISPLAY_HAS_DPMS)
+            apply_dpms(c, !!(flags & NDC_DISPLAY_DPMS_ON));
+    }
+    return NULL;
 }
 
 static void force_plane_visible(int fd, const struct plane_candidate *p)
@@ -685,7 +785,8 @@ static void *rx_thread_main(void *opaque)
 
 int nd_video_receiver_run(int port, const char *requested_drm,
                           const char *va_path, const char *interface_name,
-                          int ready_fd, int width, int height, int refresh_hz)
+                          int ready_fd, int width, int height, int refresh_hz,
+                          int state_fd)
 {
     if (port <= 0 || port > 65535 ||
         width <= 0 || width > UINT16_MAX || (width & 1) ||
@@ -769,6 +870,31 @@ int nd_video_receiver_run(int port, const char *requested_drm,
         fprintf(stderr, "no usable NV12 overlay plane; run modetest -p\n");
         return 1;
     }
+
+    struct drm_display_control display_control = {
+        .mutex = PTHREAD_MUTEX_INITIALIZER,
+        .fd = fd,
+        .state_fd = state_fd,
+        .connector_id = conn_id,
+        .crtc_id = crtc_id,
+        .plane_id = plane_id,
+        .black_fb = black.fb_id,
+        .video = video,
+        .mode = mode,
+        .stream_width = stream_width,
+        .stream_height = stream_height,
+        .front = 0,
+        .dpms_on = 1,
+    };
+    pthread_t display_thread;
+    int display_error = pthread_create(&display_thread, NULL,
+                                       display_control_thread,
+                                       &display_control);
+    if (display_error != 0) {
+        errno = display_error;
+        die("pthread_create display control");
+    }
+    pthread_detach(display_thread);
 
     AVCodecContext *dec = init_decoder(va_path);
     AVFrame *hw = av_frame_alloc();
@@ -855,7 +981,6 @@ int nd_video_receiver_run(int port, const char *requested_drm,
         ready_fd = -1;
     }
 
-    int front = 0;
     unsigned long long displayed = 0;
     unsigned long long skipped_before_decode = 0;
     uint64_t last_session = 0;
@@ -903,16 +1028,20 @@ int nd_video_receiver_run(int port, const char *requested_drm,
         have_last_seq = 1;
 
         if (decode_one(dec, decode_buf, size, seq, hw, sw) == 0) {
-            int back = front ^ 1;
+            pthread_mutex_lock(&display_control.mutex);
+            int back = display_control.front ^ 1;
             copy_decoded_to_nv12(sw, &video[back], stream_width, stream_height);
-            if (drmModeSetPlane(fd, plane_id, crtc_id, video[back].fb_id, 0,
+            if (!display_control.dpms_on) {
+                display_control.front = back;
+            } else if (drmModeSetPlane(fd, plane_id, crtc_id, video[back].fb_id, 0,
                                 0, 0, mode.hdisplay, mode.vdisplay,
                                 0, 0, stream_width << 16, stream_height << 16) != 0) {
                 perror("drmModeSetPlane frame");
             } else {
-                front = back;
+                display_control.front = back;
                 displayed++;
             }
+            pthread_mutex_unlock(&display_control.mutex);
         }
 
         struct timespec now;

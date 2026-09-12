@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <spawn.h>
 #include "proto.h"
+#include "display_state.h"
 #include "video_sender.h"
 
 extern char **environ;
@@ -18,6 +19,8 @@ struct host_cfg {
     char listen_addr[64];
     char allowed_peer[64];
     char output[128];
+    char source_output[128];
+    char brightness_device[256];
     int port;
     int video_port;
     int input_enabled;
@@ -39,7 +42,8 @@ static void cfg_defaults(struct host_cfg *c)
     c->height = ND_DEFAULT_H;
     c->refresh_hz = ND_DEFAULT_FPS;
     c->qp = 24;
-    snprintf(c->output, sizeof(c->output), "T490");
+    snprintf(c->output, sizeof(c->output), "netdisplay");
+    snprintf(c->brightness_device, sizeof(c->brightness_device), "auto");
 }
 
 static void load_cfg(const char *path, struct host_cfg *c)
@@ -65,6 +69,8 @@ static void load_cfg(const char *path, struct host_cfg *c)
         else if (!strcmp(k, "refresh_hz")) c->refresh_hz = atoi(v);
         else if (!strcmp(k, "qp")) c->qp = atoi(v);
         else if (!strcmp(k, "output")) snprintf(c->output, sizeof(c->output), "%s", v);
+        else if (!strcmp(k, "source_output")) snprintf(c->source_output, sizeof(c->source_output), "%s", v);
+        else if (!strcmp(k, "brightness_device")) snprintf(c->brightness_device, sizeof(c->brightness_device), "%s", v);
         else if (!strcmp(k, "connect_cmd")) snprintf(c->connect_cmd, sizeof(c->connect_cmd), "%s", v);
         else if (!strcmp(k, "disconnect_cmd")) snprintf(c->disconnect_cmd, sizeof(c->disconnect_cmd), "%s", v);
     }
@@ -360,6 +366,10 @@ int main(int argc, char **argv)
     }
     struct host_cfg cfg;
     load_cfg(argv[1], &cfg);
+    struct nd_display_state_source display_state;
+    if (nd_display_state_start(&display_state, cfg.output, cfg.source_output,
+                               cfg.brightness_device) < 0)
+        ndc_die("start display-state watchers");
     int ls = make_listener(&cfg);
     pthread_t discovery_thread;
     int de = pthread_create(&discovery_thread, NULL, discovery_main, &cfg);
@@ -441,10 +451,16 @@ int main(int argc, char **argv)
                     peer, strerror(errno));
             session_ok = 0;
         } else {
+            if (nd_display_state_attach(&display_state, c) < 0) {
+                session_ok = 0;
+            }
+        }
+
+        if (session_ok) {
             video_pid = spawn_builtin_sender(&cfg, peer);
             if (video_pid < 0) {
                 perror("fork built-in video sender");
-                (void)ndc_send_msg(c, NDC_STOP, NULL, 0);
+                (void)nd_display_state_send(&display_state, c, NDC_STOP, NULL, 0);
                 session_ok = 0;
             } else {
                 fprintf(stderr, "session %s started: built-in video pid %ld, input %s\n",
@@ -463,7 +479,7 @@ int main(int argc, char **argv)
                 else
                     fprintf(stderr, "built-in video sender exited\n");
                 video_pid = -1;
-                (void)ndc_send_msg(c, NDC_STOP, NULL, 0);
+                (void)nd_display_state_send(&display_state, c, NDC_STOP, NULL, 0);
                 break;
             }
 
@@ -487,7 +503,7 @@ int main(int argc, char **argv)
                     break;
                 }
             } else if (bt == NDC_PING && blen == 0) {
-                if (ndc_send_msg(c, NDC_PONG, NULL, 0) < 0) break;
+                if (nd_display_state_send(&display_state, c, NDC_PONG, NULL, 0) < 0) break;
             } else if (bt == NDC_PONG && blen == 0) {
                 /* heartbeat reply */
             } else {
@@ -497,6 +513,7 @@ int main(int argc, char **argv)
         }
 
         fprintf(stderr, "receiver %s disconnected\n", peer);
+        nd_display_state_detach(&display_state, c);
         destroy_ui(&kbm); destroy_ui(&tp);
         ndc_stop_child(&video_pid);
         close(c);

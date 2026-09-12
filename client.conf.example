@@ -11,6 +11,10 @@ interface=
 drm_device=
 vaapi_device=
 
+# Receiver panel backlight to update from the source: name from
+# /sys/class/backlight, an absolute directory, auto, or none.
+backlight_device=auto
+
 # Input is sent only when BOTH this request and server input_enabled=1 are true.
 want_input=1
 grab_input=0

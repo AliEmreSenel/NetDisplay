@@ -5,13 +5,17 @@
 
 #define NDC_MAGIC 0x4e444333u /* NDC3 */
 #define NDC_DISC_MAGIC 0x4e444344u /* NDCD */
-#define NDC_VERSION 3u
+#define NDC_VERSION 4u
 #define NDC_DEFAULT_PORT 5001u
 #define NDC_DEFAULT_VIDEO_PORT 5000u
 #define NDC_MAX_PAYLOAD 256u
 
 #define NDC_FLAG_WANT_INPUT    (1u << 0)
 #define NDC_FLAG_INPUT_ALLOWED (1u << 0)
+
+#define NDC_DISPLAY_HAS_DPMS       (1u << 0)
+#define NDC_DISPLAY_HAS_BRIGHTNESS (1u << 1)
+#define NDC_DISPLAY_DPMS_ON        (1u << 2)
 
 #define NDC_DEV_KBM      1u
 #define NDC_DEV_TOUCHPAD 2u
@@ -24,6 +28,7 @@ enum ndc_type {
     NDC_PONG    = 5,
     NDC_STOP    = 6,
     NDC_READY   = 7,
+    NDC_DISPLAY_STATE = 8,
 };
 
 enum ndc_discovery_type {
@@ -61,6 +66,13 @@ struct __attribute__((packed)) ndc_input {
     int32_t value;
 };
 
+/* Source -> receiver. Brightness is expressed as hundredths of one percent,
+ * so 0 is dark and 10000 is the source panel's maximum. */
+struct __attribute__((packed)) ndc_display_state {
+    uint32_t flags;
+    uint32_t brightness;
+};
+
 /* UDP discovery on the control port. A receiver broadcasts DISCOVER and a
  * source replies OFFER to the packet source address. TCP then carries the
  * actual control session. */
@@ -76,6 +88,7 @@ struct __attribute__((packed)) ndc_discovery {
 _Static_assert(sizeof(struct ndc_hdr) == 12, "ndc_hdr wire size");
 _Static_assert(sizeof(struct ndc_input) == 12, "ndc_input wire size");
 _Static_assert(sizeof(struct ndc_welcome) == 12, "ndc_welcome wire size");
+_Static_assert(sizeof(struct ndc_display_state) == 8, "display state wire size");
 _Static_assert(sizeof(struct ndc_discovery) == 16, "discovery wire size");
 
 #endif

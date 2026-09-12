@@ -17,6 +17,30 @@ Install the normal development dependencies for the source machine, then:
 ./build-site.sh
 ```
 
+`./build-website.sh` is an equivalent, explicit website-build entry point.
+
+## Install
+
+Install for the current user (without replacing an existing configuration):
+
+```sh
+./install.sh --server     # source computer
+./install.sh --client     # receiver computer
+```
+
+Pass `--no-start` to install without enabling or starting the user service.
+
+Display state synchronization is built into the daemons and protocol. The
+server watches the selected physical Wayland output's DPMS events and host
+backlight changes, then immediately pushes them over the existing TCP control
+connection. The receiver applies DPMS through DRM and maps the source
+brightness percentage onto its own panel backlight. It writes the backlight
+sysfs control directly when allowed and otherwise uses the active session's
+systemd-logind brightness API, so synchronization does not require running the
+client as root. GammaStep also sees the
+dynamically-created `netdisplay` Wayland output and applies its gamma changes
+to that output normally.
+
 This runs CMake, builds both programs, and creates only:
 
 ```text
@@ -100,5 +124,6 @@ stream to the available panel mode when necessary.
 - UDP 5000: H.264 video
 - UDP 5001: discovery to `255.255.255.255`
 - TCP 5001: control + optional evdev input
+- TCP display-state pushes: DPMS and normalized panel brightness
 - discovery sockets use `SO_BINDTODEVICE`
 - video remains all-IDR/latest-only so stale frames do not queue indefinitely
