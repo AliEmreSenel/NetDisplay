@@ -1,10 +1,17 @@
-# Source. One daemon, one built-in video sender.
+# Source. One daemon accepts several receiver computers concurrently.
 listen=0.0.0.0
 port=5001
+# Base destination port. A client uses video_port + display index; different
+# client IPs may safely use the same range.
 video_port=5000
+max_clients=8
+max_displays_per_client=8
+max_width=8192
+max_height=8192
+max_fps=240
 allowed_peer=
 
-# The output name created by connect_cmd and captured by the built-in sender.
+# Prefix for per-client/per-display output names created by connect_cmd.
 output=netdisplay
 # Physical host output whose DPMS state is mirrored. Blank selects the first
 # non-NetDisplay Wayland output.
@@ -12,17 +19,28 @@ source_output=
 # Host backlight name from /sys/class/backlight, an absolute directory, auto,
 # or none. Changes are pushed immediately over the control connection.
 brightness_device=auto
-width=1920
-height=1080
-refresh_hz=60
 qp=24
+
+# A password key makes interactive clients prompt when they connect. Generate
+# it by running `netdisplay-server --derive-password-key`; the password itself
+# is neither stored here nor sent over the network.
+password_key=
+
+# For unattended clients, use a PSK file instead of password. A PSK file
+# contains exactly 32 random bytes or 64 hexadecimal characters. Configure
+# exactly one of password_key or psk_file.
+psk_file=
+# off rejects encrypted clients; allowed accepts the client's choice; required
+# rejects plaintext clients. Encryption requires password or psk_file and is
+# never silently downgraded.
+frame_encryption=off
 
 # Source-side gate. A receiver cannot enable this remotely.
 input_enabled=0
 
 # LOCAL lifecycle hooks only. The network protocol has no command/string field.
-# Environment: ND_PEER_IP ND_OUTPUT ND_VIDEO_PORT ND_CONTROL_PORT
-#              ND_WIDTH ND_HEIGHT ND_REFRESH_HZ
+# Invoked once per display. Environment: ND_PEER_IP ND_OUTPUT ND_CONNECTOR
+# ND_DISPLAY_ID ND_VIDEO_PORT ND_CONTROL_PORT ND_WIDTH ND_HEIGHT ND_REFRESH_HZ
 # Hyprland's current live configuration API is Lua.  `output` still creates
 # the headless connector; `eval` applies its monitor rule.  Keep output names
 # to ordinary identifier characters if changing this command.

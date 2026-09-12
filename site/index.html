@@ -7,46 +7,232 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 say() { printf 'netdisplay: %s\n' "$*" >&2; }
 fail() { say "$*"; exit 1; }
-get() { curl -fsSL --retry 2 --connect-timeout 5 "$1" -o "$2"; }
+get() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 2 --connect-timeout 5 "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=5 --tries=3 "$1" -O "$2"
+    else
+        fail "curl or wget is required"
+    fi
+}
 
-command -v curl >/dev/null 2>&1 || fail "curl is required"
+MODE=client
+case "${1:-}" in
+    --server) MODE=server; shift ;;
+    --client) shift ;;
+esac
+[ "$#" -le 1 ] || fail "usage: sh [--client|--server] [CONFIG]"
+DEFAULT_CONFIG=0
+
+DISTRO_ID=unknown
+DISTRO_NAME=Linux
+if [ -r /etc/os-release ]; then
+    # The distro owns this shell-compatible metadata file.
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    DISTRO_ID=${ID:-unknown}
+    DISTRO_NAME=${PRETTY_NAME:-${NAME:-Linux}}
+fi
 
 case "$(uname -m)" in
     x86_64|amd64) ARCH=x86_64 ;;
     aarch64|arm64) ARCH=aarch64 ;;
     *) ARCH=$(uname -m) ;;
 esac
+say "detected $DISTRO_NAME on $ARCH; mode=$MODE"
 
-BIN="$TMP/netdisplay-client"
-say "trying prebuilt client for $ARCH"
-if get "$BASE/netdisplay-client-$ARCH" "$BIN" 2>/dev/null; then
+# With no explicit path, put an editable example in the path the binary reads.
+if [ "$#" -eq 0 ]; then
+    DEFAULT_CONFIG=1
+    CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:?HOME is not set}}
+    [ -n "${XDG_CONFIG_HOME:-}" ] || CONFIG_HOME="$CONFIG_HOME/.config"
+    CONFIG_DIR="$CONFIG_HOME/netdisplay"
+    CONFIG="$CONFIG_DIR/$MODE.conf"
+    if [ ! -e "$CONFIG" ]; then
+        mkdir -p "$CONFIG_DIR"
+        get "$BASE/$MODE.conf.example" "$TMP/$MODE.conf" ||
+            fail "cannot create $CONFIG from the published example"
+        chmod 0644 "$TMP/$MODE.conf"
+        cp "$TMP/$MODE.conf" "$CONFIG"
+        say "created $CONFIG"
+    else
+        say "using $CONFIG"
+    fi
+    set -- "$CONFIG"
+fi
+
+check_build_deps() {
+    MISSING=
+    for dep in cmake cc pkg-config tar; do
+        command -v "$dep" >/dev/null 2>&1 || MISSING="$MISSING $dep"
+    done
+    if [ "$MODE" = server ]; then
+        command -v wayland-scanner >/dev/null 2>&1 || MISSING="$MISSING wayland-scanner"
+        PCS="wayland-client libavcodec libavutil wlr-protocols libsodium"
+    else
+        PCS="libdrm libavcodec libavutil libva libva-drm libsodium"
+    fi
+    if command -v pkg-config >/dev/null 2>&1; then
+        for dep in $PCS; do
+            pkg-config --exists "$dep" || MISSING="$MISSING $dep"
+        done
+    else
+        MISSING="$MISSING $PCS"
+    fi
+    [ -z "$MISSING" ]
+}
+
+run_as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        say "administrator access is needed only to install missing packages"
+        sudo "$@"
+    elif command -v doas >/dev/null 2>&1; then
+        say "administrator access is needed only to install missing packages"
+        doas "$@"
+    else
+        fail "missing build packages and no sudo/doas is available; install them as root:$MISSING"
+    fi
+}
+
+install_build_deps() {
+    say "missing source-build requirements:$MISSING"
+    say "trying to install the $MODE build requirements for $DISTRO_ID"
+    if command -v apt-get >/dev/null 2>&1; then
+        run_as_root apt-get update
+        if [ "$MODE" = server ]; then
+            run_as_root apt-get install -y build-essential cmake pkg-config tar \
+                libwayland-dev libwayland-bin wlr-protocols libavcodec-dev \
+                libavutil-dev libsodium-dev
+        else
+            run_as_root apt-get install -y build-essential cmake pkg-config tar \
+                libdrm-dev libavcodec-dev libavutil-dev libva-dev libsodium-dev
+        fi
+    elif command -v dnf >/dev/null 2>&1; then
+        if [ "$MODE" = server ]; then
+            run_as_root dnf install -y gcc cmake pkgconf-pkg-config tar \
+                wayland-devel wlr-protocols-devel ffmpeg-free-devel libsodium-devel
+        else
+            run_as_root dnf install -y gcc cmake pkgconf-pkg-config tar \
+                libdrm-devel ffmpeg-free-devel libva-devel libsodium-devel
+        fi
+    elif command -v yum >/dev/null 2>&1; then
+        if [ "$MODE" = server ]; then
+            run_as_root yum install -y gcc cmake pkgconfig tar wayland-devel \
+                wlr-protocols-devel ffmpeg-free-devel libsodium-devel
+        else
+            run_as_root yum install -y gcc cmake pkgconfig tar libdrm-devel \
+                ffmpeg-free-devel libva-devel libsodium-devel
+        fi
+    elif command -v zypper >/dev/null 2>&1; then
+        if [ "$MODE" = server ]; then
+            run_as_root zypper --non-interactive install gcc cmake pkg-config tar \
+                wayland-devel wlr-protocols-devel libavcodec-devel \
+                libavutil-devel libsodium-devel
+        else
+            run_as_root zypper --non-interactive install gcc cmake pkg-config tar \
+                libdrm-devel libavcodec-devel libavutil-devel libva-devel libsodium-devel
+        fi
+    elif command -v pacman >/dev/null 2>&1; then
+        if [ "$MODE" = server ]; then
+            run_as_root pacman -S --needed --noconfirm base-devel cmake pkgconf tar \
+                wayland wlr-protocols ffmpeg libsodium
+        else
+            run_as_root pacman -S --needed --noconfirm base-devel cmake pkgconf tar \
+                libdrm ffmpeg libva libsodium
+        fi
+    elif command -v apk >/dev/null 2>&1; then
+        if [ "$MODE" = server ]; then
+            run_as_root apk add build-base cmake pkgconf tar wayland-dev \
+                wlr-protocols ffmpeg-dev libsodium-dev
+        else
+            run_as_root apk add build-base cmake pkgconf tar libdrm-dev ffmpeg-dev \
+                libva-dev libsodium-dev
+        fi
+    elif command -v xbps-install >/dev/null 2>&1; then
+        if [ "$MODE" = server ]; then
+            run_as_root xbps-install -Sy base-devel cmake pkg-config tar \
+                wayland-devel wlr-protocols ffmpeg-devel libsodium-devel
+        else
+            run_as_root xbps-install -Sy base-devel cmake pkg-config tar \
+                libdrm-devel ffmpeg-devel libva-devel libsodium-devel
+        fi
+    else
+        fail "unsupported package manager on $DISTRO_NAME; missing:$MISSING"
+    fi
+}
+
+TARGET="netdisplay-$MODE"
+BIN="$TMP/$TARGET"
+HAVE_BIN=0
+say "trying prebuilt $MODE for $ARCH"
+if get "$BASE/$TARGET-$ARCH" "$BIN" 2>/dev/null; then
     chmod +x "$BIN"
     if "$BIN" --version >/dev/null 2>&1; then
-        say "prebuilt works; starting"
-        trap - EXIT HUP INT TERM
-        exec "$BIN" "$@"
+        say "prebuilt works"
+        HAVE_BIN=1
+    else
+        say "prebuilt is not compatible; building the distributed C source"
     fi
-    say "prebuilt is not compatible; building the distributed C source"
 else
     say "no prebuilt for $ARCH; building the distributed C source"
 fi
 
-for x in cmake cc pkg-config tar; do
-    command -v "$x" >/dev/null 2>&1 || fail "source fallback needs: cmake, cc, pkg-config, tar"
-done
-pkg-config --exists libdrm libavcodec libavutil libva libva-drm || fail \
-    "source fallback needs development packages for libdrm, libavcodec, libavutil and libva"
+if [ "$HAVE_BIN" -eq 0 ]; then
+    if ! check_build_deps; then
+        install_build_deps
+        check_build_deps || fail "packages were installed but requirements are still missing:$MISSING"
+    fi
 
-SRC="$TMP/source.tar.gz"
-get "$BASE/source.tar.gz" "$SRC" || fail "cannot download source.tar.gz"
-mkdir "$TMP/src"
-tar -xzf "$SRC" -C "$TMP/src"
-cmake -S "$TMP/src" -B "$TMP/build" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DNETDISPLAY_BUILD_SERVER=OFF \
-    -DNETDISPLAY_BUILD_CLIENT=ON
-cmake --build "$TMP/build" --target netdisplay-client -j"${NETDISPLAY_JOBS:-2}"
+    SRC="$TMP/source.tar.gz"
+    get "$BASE/source.tar.gz" "$SRC" || fail "cannot download source.tar.gz"
+    mkdir "$TMP/src"
+    tar -xzf "$SRC" -C "$TMP/src"
+    if [ "$MODE" = server ]; then
+        BUILD_SERVER=ON
+        BUILD_CLIENT=OFF
+    else
+        BUILD_SERVER=OFF
+        BUILD_CLIENT=ON
+    fi
+    cmake -S "$TMP/src" -B "$TMP/build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_TESTING=OFF \
+        -DNETDISPLAY_BUILD_SERVER="$BUILD_SERVER" \
+        -DNETDISPLAY_BUILD_CLIENT="$BUILD_CLIENT"
+    cmake --build "$TMP/build" --target "$TARGET" -j"${NETDISPLAY_JOBS:-2}"
+    BIN="$TMP/build/$TARGET"
+    say "local build succeeded"
+fi
 
-say "local build succeeded; starting"
+if [ "$MODE" = server ] && [ "$DEFAULT_CONFIG" -eq 1 ] &&
+   ! grep -Eq '^[[:space:]]*(password_key|psk_file)=[[:space:]]*[^[:space:]]' "$CONFIG"; then
+    if ! command -v od >/dev/null 2>&1 || ! command -v tr >/dev/null 2>&1; then
+        fail "od and tr are required to generate the initial server password"
+    fi
+    PASSWORD=$(LC_ALL=C od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    [ "${#PASSWORD}" -eq 32 ] || fail "could not generate a server password"
+    PASSWORD_KEY=$(printf '%s\n' "$PASSWORD" | "$BIN" --derive-password-key) ||
+        fail "could not derive the server password key"
+    if grep -Eq '^[[:space:]]*password_key=[[:space:]]*$' "$CONFIG"; then
+        sed "s/^[[:space:]]*password_key=[[:space:]]*$/password_key=$PASSWORD_KEY/" \
+            "$CONFIG" > "$TMP/server.conf"
+        cp "$TMP/server.conf" "$CONFIG"
+    else
+        printf '\npassword_key=%s\n' "$PASSWORD_KEY" >> "$CONFIG"
+    fi
+    chmod 0600 "$CONFIG"
+    say "generated server password: $PASSWORD"
+    say "stored only its Argon2id-derived key in $CONFIG"
+    say "clients will be prompted for the password"
+    unset PASSWORD PASSWORD_KEY
+fi
+if [ "$MODE" = server ] && [ "$DEFAULT_CONFIG" -eq 1 ]; then
+    chmod 0600 "$CONFIG"
+fi
+
+say "starting $MODE"
 trap - EXIT HUP INT TERM
-exec "$TMP/build/netdisplay-client" "$@"
+exec "$BIN" "$@"

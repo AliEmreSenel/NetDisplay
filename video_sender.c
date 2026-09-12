@@ -26,6 +26,8 @@
 #include <libavutil/pixfmt.h>
 
 #include "proto.h"
+#include "common.h"
+#include "crypto.h"
 #include "screencopy.h"
 #include "video_sender.h"
 
@@ -62,6 +64,9 @@ static int qp = 24;
 static uint32_t stream_width;
 static uint32_t stream_height;
 static uint32_t stream_fps;
+static int frame_encrypted;
+static uint8_t frame_key[ND_KEY_SIZE];
+static uint8_t *encrypted_frame;
 
 /* Encoder -> TX handoff.  There is no FIFO: latest_pkt is a single slot.
  * If the producer publishes again before TX takes it, the older complete
@@ -344,6 +349,15 @@ static int send_encoded_frame(const uint8_t *data, size_t size, uint32_t seq)
         return -1;
     }
 
+    if (frame_encrypted) {
+        size_t encrypted_size = 0;
+        if (nd_crypto_encrypt(encrypted_frame, &encrypted_size, data, size,
+                              frame_key, session_id, seq) < 0)
+            return -1;
+        data = encrypted_frame;
+        size = encrypted_size;
+    }
+
     uint32_t count32 = (uint32_t)((size + ND_FRAG_DATA - 1u) / ND_FRAG_DATA);
     if (count32 == 0 || count32 > UINT16_MAX) {
         atomic_fetch_add_explicit(&stat_oversize, 1, memory_order_relaxed);
@@ -565,6 +579,10 @@ static int encode_and_publish(int y_invert)
     }
     if (ret < 0) ff_die("avcodec_receive_packet", ret);
 
+    if (frame_encrypted && seq_id == UINT32_MAX) {
+        fprintf(stderr, "encrypted frame counter exhausted; restarting stream\n");
+        exit(EXIT_SUCCESS);
+    }
     stat_encoded++;
     uint32_t seq = ++seq_id;
     if ((size_t)enc_pkt->size > ND_MAX_FRAME) {
@@ -704,7 +722,8 @@ static void request_frame(void)
 
 int nd_video_sender_run(const char *output_name, const char *ip,
                         int port, int qp_value, int width, int height,
-                        int refresh_hz)
+                        int refresh_hz, uint64_t wire_session,
+                        int encrypted, int key_fd)
 {
     if (!output_name || !*output_name || !ip || !*ip ||
         port <= 0 || port > 65535 || qp_value < 0 || qp_value > 51 ||
@@ -718,9 +737,17 @@ int nd_video_sender_run(const char *output_name, const char *ip,
     stream_width = (uint32_t)width;
     stream_height = (uint32_t)height;
     stream_fps = (uint32_t)refresh_hz;
+    frame_encrypted = encrypted;
+    if (frame_encrypted) {
+        if (key_fd < 0 || ndc_read_full(key_fd, frame_key, sizeof(frame_key)) <= 0)
+            die("read video key");
+        close(key_fd);
+        encrypted_frame = av_malloc(ND_MAX_WIRE_FRAME);
+        if (!encrypted_frame) die("av_malloc encrypted frame");
+    }
 
     setup_udp(ip, port);
-    session_id = make_session_id();
+    session_id = wire_session ? wire_session : make_session_id();
     seq_id = 0;
     start_tx_thread();
 
@@ -748,9 +775,9 @@ int nd_video_sender_run(const char *output_name, const char *ip,
     }
 
     fprintf(stderr,
-            "stream %ux%u@%u all-IDR H.264: output=%s -> %s:%d session=%016llx\n",
+            "stream %ux%u@%u all-IDR H.264: output=%s -> %s:%d session=%016llx encryption=%s\n",
             stream_width, stream_height, stream_fps, output_name, ip, port,
-            (unsigned long long)session_id);
+            (unsigned long long)session_id, frame_encrypted ? "on" : "off");
 
     request_frame();
     while (wl_display_dispatch(display) >= 0) { }

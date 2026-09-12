@@ -27,6 +27,7 @@
 
 #include "proto.h"
 #include "common.h"
+#include "crypto.h"
 #include "video_receiver.h"
 
 struct dumb_fb {
@@ -119,20 +120,19 @@ static int crtc_index(drmModeRes *res, uint32_t crtc_id)
     return -1;
 }
 
-static drmModeConnector *find_edp(int fd, drmModeRes *res)
+static drmModeConnector *find_connected(int fd, drmModeRes *res)
 {
     for (int i = 0; i < res->count_connectors; i++) {
         drmModeConnector *c = drmModeGetConnector(fd, res->connectors[i]);
         if (!c) continue;
-        if (c->connector_type == DRM_MODE_CONNECTOR_eDP &&
-            c->connection == DRM_MODE_CONNECTED && c->count_modes > 0)
+        if (c->connection == DRM_MODE_CONNECTED && c->count_modes > 0)
             return c;
         drmModeFreeConnector(c);
     }
     return NULL;
 }
 
-static int open_edp_drm(const char *requested, char *chosen, size_t chosen_sz)
+static int open_connected_drm(const char *requested, char *chosen, size_t chosen_sz)
 {
     if (requested) {
         int fd = open(requested, O_RDWR | O_CLOEXEC);
@@ -148,7 +148,7 @@ static int open_edp_drm(const char *requested, char *chosen, size_t chosen_sz)
         if (fd < 0) continue;
         drmModeRes *res = drmModeGetResources(fd);
         if (!res) { close(fd); continue; }
-        drmModeConnector *c = find_edp(fd, res);
+        drmModeConnector *c = find_connected(fd, res);
         if (c) {
             drmModeFreeConnector(c);
             drmModeFreeResources(res);
@@ -162,9 +162,31 @@ static int open_edp_drm(const char *requested, char *chosen, size_t chosen_sz)
     return -1;
 }
 
-static drmModeModeInfo choose_mode(drmModeConnector *c, uint32_t width,
-                                   uint32_t height)
+static drmModeConnector *find_connector_id(int fd, drmModeRes *res, uint32_t id)
 {
+    for (int i = 0; i < res->count_connectors; i++) {
+        if (res->connectors[i] != id) continue;
+        return drmModeGetConnector(fd, id);
+    }
+    return NULL;
+}
+
+static int mode_refresh(const drmModeModeInfo *mode)
+{
+    if (mode->vrefresh > 0) return mode->vrefresh;
+    if (!mode->htotal || !mode->vtotal) return 0;
+    return (int)(((uint64_t)mode->clock * 1000u +
+                  ((uint64_t)mode->htotal * mode->vtotal) / 2u) /
+                 ((uint64_t)mode->htotal * mode->vtotal));
+}
+
+static drmModeModeInfo choose_mode(drmModeConnector *c, uint32_t width,
+                                   uint32_t height, uint32_t refresh_hz)
+{
+    for (int i = 0; i < c->count_modes; i++)
+        if (c->modes[i].hdisplay == width && c->modes[i].vdisplay == height &&
+            (uint32_t)mode_refresh(&c->modes[i]) == refresh_hz)
+            return c->modes[i];
     for (int i = 0; i < c->count_modes; i++)
         if ((c->modes[i].type & DRM_MODE_TYPE_PREFERRED) &&
             c->modes[i].hdisplay == width && c->modes[i].vdisplay == height)
@@ -178,35 +200,77 @@ static drmModeModeInfo choose_mode(drmModeConnector *c, uint32_t width,
     return c->modes[0];
 }
 
-static uint32_t choose_crtc(int fd, drmModeRes *res, drmModeConnector *c,
-                            int *idx)
+static drmModeModeInfo preferred_mode(drmModeConnector *c)
 {
-    if (c->encoder_id) {
-        drmModeEncoder *e = drmModeGetEncoder(fd, c->encoder_id);
-        if (e && e->crtc_id) {
-            int i = crtc_index(res, e->crtc_id);
-            uint32_t id = e->crtc_id;
-            drmModeFreeEncoder(e);
-            if (i >= 0) { *idx = i; return id; }
-        } else if (e) {
-            drmModeFreeEncoder(e);
-        }
-    }
+    for (int i = 0; i < c->count_modes; i++)
+        if (c->modes[i].type & DRM_MODE_TYPE_PREFERRED) return c->modes[i];
+    return c->modes[0];
+}
 
+static uint32_t choose_unused_crtc(int fd, drmModeRes *res,
+                                   drmModeConnector *c, uint32_t used)
+{
     for (int ei = 0; ei < c->count_encoders; ei++) {
         drmModeEncoder *e = drmModeGetEncoder(fd, c->encoders[ei]);
         if (!e) continue;
-        for (int i = 0; i < res->count_crtcs; i++) {
-            if (e->possible_crtcs & (1u << i)) {
+        for (int i = 0; i < res->count_crtcs && i < 32; i++) {
+            if ((e->possible_crtcs & (1u << i)) && !(used & (1u << i))) {
                 uint32_t id = res->crtcs[i];
                 drmModeFreeEncoder(e);
-                *idx = i;
                 return id;
             }
         }
         drmModeFreeEncoder(e);
     }
     return 0;
+}
+
+int nd_video_open_displays(const char *requested_drm, int *master_fd,
+                           char *drm_path, size_t path_size,
+                           struct nd_local_display *out, int capacity)
+{
+    if (!master_fd || !out || capacity <= 0) { errno = EINVAL; return -1; }
+    int fd = open_connected_drm(requested_drm, drm_path, path_size);
+    if (fd < 0) return -1;
+    if (drmSetMaster(fd) < 0) { int e = errno; close(fd); errno = e; return -1; }
+    if (drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) < 0) {
+        int e = errno; close(fd); errno = e; return -1;
+    }
+    (void)drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1);
+
+    drmModeRes *res = drmModeGetResources(fd);
+    if (!res) { int e = errno; close(fd); errno = e; return -1; }
+    uint32_t used = 0;
+    int count = 0;
+    for (int i = 0; i < res->count_connectors && count < capacity; i++) {
+        drmModeConnector *c = drmModeGetConnector(fd, res->connectors[i]);
+        if (!c) continue;
+        if (c->connection != DRM_MODE_CONNECTED || c->count_modes <= 0) {
+            drmModeFreeConnector(c);
+            continue;
+        }
+        uint32_t crtc = choose_unused_crtc(fd, res, c, used);
+        int ci = crtc_index(res, crtc);
+        if (!crtc || ci < 0) { drmModeFreeConnector(c); continue; }
+        drmModeModeInfo mode = preferred_mode(c);
+        struct nd_local_display *d = &out[count++];
+        memset(d, 0, sizeof(*d));
+        d->connector_id = c->connector_id;
+        d->crtc_id = crtc;
+        snprintf(d->connector, sizeof(d->connector), "%s-%u",
+                 drmModeGetConnectorTypeName(c->connector_type),
+                 c->connector_type_id);
+        d->width = (uint16_t)mode.hdisplay;
+        d->height = (uint16_t)mode.vdisplay;
+        int hz = mode_refresh(&mode);
+        d->refresh_hz = (uint16_t)(hz > 0 ? hz : 60);
+        used |= 1u << ci;
+        drmModeFreeConnector(c);
+    }
+    drmModeFreeResources(res);
+    if (!count) { close(fd); errno = ENODEV; return -1; }
+    *master_fd = fd;
+    return count;
 }
 
 static int plane_has_format(drmModePlane *p, uint32_t format)
@@ -414,7 +478,8 @@ static uint32_t choose_nv12_plane(int fd, uint32_t crtc_id, int crtc_idx,
         drmModePlane *p = drmModeGetPlane(fd, prs->planes[i]);
         if (!p) continue;
         if (!(p->possible_crtcs & (1u << crtc_idx)) ||
-            !plane_has_format(p, DRM_FORMAT_NV12)) {
+            !plane_has_format(p, DRM_FORMAT_NV12) ||
+            (p->crtc_id && p->crtc_id != crtc_id)) {
             drmModeFreePlane(p);
             continue;
         }
@@ -613,6 +678,8 @@ struct rx_ctx {
     struct frame_mailbox *mailbox;
     uint8_t *assembly_buf;
     struct rx_stats *stats;
+    int encrypted;
+    uint8_t key[ND_KEY_SIZE];
 };
 
 static void mailbox_publish(struct rx_ctx *rx, uint32_t size,
@@ -689,7 +756,7 @@ static void *rx_thread_main(void *opaque)
         uint32_t frame_size = ntohl(h.frame_size);
 
         if (!sess || !frag_count || frame_size == 0 ||
-            frame_size > ND_MAX_FRAME) {
+            frame_size > (rx->encrypted ? ND_MAX_WIRE_FRAME : ND_MAX_FRAME)) {
             atomic_fetch_add_explicit(&st->bad, 1, memory_order_relaxed);
             continue;
         }
@@ -772,6 +839,19 @@ static void *rx_thread_main(void *opaque)
         got_count++;
 
         if (got_count == current_frag_count) {
+            if (rx->encrypted) {
+                size_t plain_size = 0;
+                if (nd_crypto_decrypt(rx->assembly_buf, &plain_size,
+                                      rx->assembly_buf, current_size, rx->key,
+                                      current_session, current_seq) < 0 ||
+                    plain_size == 0 || plain_size > ND_MAX_FRAME) {
+                    atomic_fetch_add_explicit(&st->bad, 1,
+                                              memory_order_relaxed);
+                    assembling = 0;
+                    continue;
+                }
+                current_size = (uint32_t)plain_size;
+            }
             memset(rx->assembly_buf + current_size, 0,
                    AV_INPUT_BUFFER_PADDING_SIZE);
             atomic_fetch_add_explicit(&st->complete, 1,
@@ -783,10 +863,11 @@ static void *rx_thread_main(void *opaque)
     }
 }
 
-int nd_video_receiver_run(int port, const char *requested_drm,
-                          const char *va_path, const char *interface_name,
-                          int ready_fd, int width, int height, int refresh_hz,
-                          int state_fd)
+int nd_video_receiver_run(int port, int fd, uint32_t connector_id,
+                          uint32_t requested_crtc, const char *va_path,
+                          const char *interface_name, int ready_fd, int width,
+                          int height, int refresh_hz, int state_fd,
+                          int encrypted, int key_fd)
 {
     if (port <= 0 || port > 65535 ||
         width <= 0 || width > UINT16_MAX || (width & 1) ||
@@ -797,38 +878,20 @@ int nd_video_receiver_run(int port, const char *requested_drm,
     }
     uint32_t stream_width = (uint32_t)width;
     uint32_t stream_height = (uint32_t)height;
-    if (requested_drm && !*requested_drm) requested_drm = NULL;
     if (va_path && !*va_path) va_path = NULL;
-
-    char drm_path[64];
-    int fd = open_edp_drm(requested_drm, drm_path, sizeof(drm_path));
-    if (fd < 0) {
-        if (requested_drm)
-            perror(requested_drm);
-        else
-            fprintf(stderr, "no DRM card with connected eDP found\n");
-        return 1;
-    }
-    fprintf(stderr, "using DRM device %s\n", drm_path);
-
-    if (drmSetMaster(fd) < 0)
-        die("drmSetMaster (stop display-manager; run from a VT/root)");
-    if (drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) < 0)
-        die("DRM_CLIENT_CAP_UNIVERSAL_PLANES");
-    if (drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) < 0)
-        fprintf(stderr,
-                "warning: DRM atomic client capability unavailable; continuing\n");
+    if (fd < 0 || !connector_id || !requested_crtc) return 2;
 
     drmModeRes *res = drmModeGetResources(fd);
     if (!res)
         die("drmModeGetResources");
-    drmModeConnector *conn = find_edp(fd, res);
+    drmModeConnector *conn = find_connector_id(fd, res, connector_id);
     if (!conn) {
-        fprintf(stderr, "no connected eDP\n");
+        fprintf(stderr, "DRM connector %u is no longer available\n", connector_id);
         return 1;
     }
 
-    drmModeModeInfo mode = choose_mode(conn, stream_width, stream_height);
+    drmModeModeInfo mode = choose_mode(conn, stream_width, stream_height,
+                                       (uint32_t)refresh_hz);
     if (mode.hdisplay != stream_width || mode.vdisplay != stream_height) {
         fprintf(stderr,
                 "warning: panel mode is %ux%u; stream is %ux%u (plane will scale)\n",
@@ -836,8 +899,9 @@ int nd_video_receiver_run(int port, const char *requested_drm,
     }
 
     int crtc_idx = -1;
-    uint32_t crtc_id = choose_crtc(fd, res, conn, &crtc_idx);
-    if (!crtc_id) {
+    uint32_t crtc_id = requested_crtc;
+    crtc_idx = crtc_index(res, crtc_id);
+    if (crtc_idx < 0) {
         fprintf(stderr, "no usable CRTC\n");
         return 1;
     }
@@ -936,11 +1000,11 @@ int nd_video_receiver_run(int port, const char *requested_drm,
      *   decode_buf:   decoder currently owns it
      * Pointer swaps make publication zero-copy. */
     uint8_t *assembly_buf =
-        av_malloc((size_t)ND_MAX_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
+        av_malloc((size_t)ND_MAX_WIRE_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
     uint8_t *latest_buf =
-        av_malloc((size_t)ND_MAX_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
+        av_malloc((size_t)ND_MAX_WIRE_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
     uint8_t *decode_buf =
-        av_malloc((size_t)ND_MAX_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
+        av_malloc((size_t)ND_MAX_WIRE_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
     if (!assembly_buf || !latest_buf || !decode_buf)
         die("av_malloc compressed buffers");
 
@@ -960,7 +1024,13 @@ int nd_video_receiver_run(int port, const char *requested_drm,
         .mailbox = &mailbox,
         .assembly_buf = assembly_buf,
         .stats = &stats,
+        .encrypted = encrypted,
     };
+    if (encrypted) {
+        if (key_fd < 0 || ndc_read_full(key_fd, rx.key, sizeof(rx.key)) <= 0)
+            die("read video key");
+        close(key_fd);
+    }
 
     pthread_t rx_thread;
     int perr = pthread_create(&rx_thread, NULL, rx_thread_main, &rx);
@@ -970,8 +1040,9 @@ int nd_video_receiver_run(int port, const char *requested_drm,
     }
 
     fprintf(stderr,
-            "listening port %d for %ux%u@%d; RX runs continuously; only newest complete IDR is decoded\n",
-            port, stream_width, stream_height, refresh_hz);
+            "listening port %d for %ux%u@%d encryption=%s; RX runs continuously; only newest complete IDR is decoded\n",
+            port, stream_width, stream_height, refresh_hz,
+            encrypted ? "on" : "off");
 
     if (ready_fd >= 0) {
         const uint8_t ready = 1;

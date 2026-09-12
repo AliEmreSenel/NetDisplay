@@ -6,7 +6,8 @@
 
 struct nd_display_state_source {
     pthread_mutex_t mutex;
-    int session_fd;
+    int session_fds[32];
+    unsigned session_count;
     uint32_t flags;
     uint32_t brightness;
     char output[128];

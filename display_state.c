@@ -33,23 +33,32 @@ struct wayland_watch {
 static int source_matches(const struct nd_display_state_source *s,
                           const char *name)
 {
-    if (!name || !*name || !strcmp(name, s->output)) return 0;
+    if (!name || !*name) return 0;
+    size_t prefix = strlen(s->output);
+    if (!strncmp(name, s->output, prefix) &&
+        (name[prefix] == 0 || name[prefix] == '-')) return 0;
     return !s->source_output[0] || !strcmp(name, s->source_output);
 }
 
 static int send_state_locked(struct nd_display_state_source *s)
 {
-    if (s->session_fd < 0 || !s->flags) return 0;
+    if (!s->session_count || !s->flags) return 0;
     struct ndc_display_state state = {
         .flags = htonl(s->flags),
         .brightness = htonl(s->brightness),
     };
-    if (ndc_send_msg(s->session_fd, NDC_DISPLAY_STATE,
-                     &state, sizeof(state)) == 0)
-        return 0;
-    shutdown(s->session_fd, SHUT_RDWR);
-    s->session_fd = -1;
-    return -1;
+    int result = 0;
+    for (unsigned i = 0; i < s->session_count;) {
+        int fd = s->session_fds[i];
+        if (ndc_send_msg(fd, NDC_DISPLAY_STATE, &state, sizeof(state)) == 0) {
+            i++;
+            continue;
+        }
+        shutdown(fd, SHUT_RDWR);
+        s->session_fds[i] = s->session_fds[--s->session_count];
+        result = -1;
+    }
+    return result;
 }
 
 static void publish_dpms(struct nd_display_state_source *s, int on)
@@ -310,7 +319,7 @@ int nd_display_state_start(struct nd_display_state_source *s,
 {
     memset(s, 0, sizeof(*s));
     s->mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    s->session_fd = -1;
+    s->session_count = 0;
     snprintf(s->output, sizeof(s->output), "%s", output);
     snprintf(s->source_output, sizeof(s->source_output), "%s", source_output);
     snprintf(s->brightness_device, sizeof(s->brightness_device), "%s",
@@ -328,7 +337,12 @@ int nd_display_state_start(struct nd_display_state_source *s,
 int nd_display_state_attach(struct nd_display_state_source *s, int fd)
 {
     pthread_mutex_lock(&s->mutex);
-    s->session_fd = fd;
+    if (s->session_count >= sizeof(s->session_fds) / sizeof(s->session_fds[0])) {
+        pthread_mutex_unlock(&s->mutex);
+        errno = ENOSPC;
+        return -1;
+    }
+    s->session_fds[s->session_count++] = fd;
     int rc = send_state_locked(s);
     pthread_mutex_unlock(&s->mutex);
     return rc;
@@ -337,7 +351,11 @@ int nd_display_state_attach(struct nd_display_state_source *s, int fd)
 void nd_display_state_detach(struct nd_display_state_source *s, int fd)
 {
     pthread_mutex_lock(&s->mutex);
-    if (s->session_fd == fd) s->session_fd = -1;
+    for (unsigned i = 0; i < s->session_count; i++) {
+        if (s->session_fds[i] != fd) continue;
+        s->session_fds[i] = s->session_fds[--s->session_count];
+        break;
+    }
     pthread_mutex_unlock(&s->mutex);
 }
 
@@ -345,7 +363,10 @@ int nd_display_state_send(struct nd_display_state_source *s, int fd,
                           uint16_t type, const void *payload, uint32_t len)
 {
     pthread_mutex_lock(&s->mutex);
-    int rc = s->session_fd == fd ? ndc_send_msg(fd, type, payload, len) : -1;
+    int found = 0;
+    for (unsigned i = 0; i < s->session_count; i++)
+        if (s->session_fds[i] == fd) { found = 1; break; }
+    int rc = found ? ndc_send_msg(fd, type, payload, len) : -1;
     pthread_mutex_unlock(&s->mutex);
     return rc;
 }

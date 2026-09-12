@@ -11,6 +11,7 @@
 #define ND_DEFAULT_FPS 60u
 #define ND_UDP_PAYLOAD_MAX 1472u
 #define ND_MAX_FRAME (4u * 1024u * 1024u)
+#define ND_MAX_WIRE_FRAME (ND_MAX_FRAME + 16u)
 
 struct __attribute__((packed)) nd_hdr {
     uint32_t magic;
@@ -23,7 +24,7 @@ struct __attribute__((packed)) nd_hdr {
 
 #define ND_HDR_SIZE ((unsigned)sizeof(struct nd_hdr))
 #define ND_FRAG_DATA (ND_UDP_PAYLOAD_MAX - ND_HDR_SIZE)
-#define ND_MAX_FRAGS ((ND_MAX_FRAME + ND_FRAG_DATA - 1u) / ND_FRAG_DATA)
+#define ND_MAX_FRAGS ((ND_MAX_WIRE_FRAME + ND_FRAG_DATA - 1u) / ND_FRAG_DATA)
 
 _Static_assert(sizeof(struct nd_hdr) == 24, "wire header must stay 24 bytes");
 _Static_assert(ND_FRAG_DATA > 1000, "fragment payload unexpectedly small");

@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(netdisplay LANGUAGES C)
+include(CTest)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -12,6 +13,7 @@ set(NETDISPLAY_STATIC_CLIENT_PREFIX "" CACHE PATH
 
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
+pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 
 add_library(nd_flags INTERFACE)
 target_compile_options(nd_flags INTERFACE
@@ -48,7 +50,7 @@ if(NETDISPLAY_BUILD_SERVER)
         DEPENDS "${SC_XML}")
 
     add_executable(netdisplay-server
-        server.c display_state.c video_sender.c
+        server.c display_state.c video_sender.c crypto.c
         "${CMAKE_CURRENT_BINARY_DIR}/screencopy.c"
         "${CMAKE_CURRENT_BINARY_DIR}/screencopy.h"
         "${CMAKE_CURRENT_BINARY_DIR}/output-power.c"
@@ -56,17 +58,33 @@ if(NETDISPLAY_BUILD_SERVER)
     target_include_directories(netdisplay-server PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(netdisplay-server PRIVATE
-        nd_flags Threads::Threads PkgConfig::WAYLAND PkgConfig::SERVER_FFMPEG)
+        nd_flags Threads::Threads PkgConfig::WAYLAND PkgConfig::SERVER_FFMPEG
+        PkgConfig::SODIUM)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(netdisplay-crypto-test tests/crypto_test.c crypto.c)
+    target_include_directories(netdisplay-crypto-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(netdisplay-crypto-test PRIVATE nd_flags PkgConfig::SODIUM)
+    add_test(NAME crypto-roundtrip COMMAND netdisplay-crypto-test)
+    if(NETDISPLAY_BUILD_SERVER)
+        add_executable(netdisplay-control-test tests/control_test.c crypto.c)
+        target_include_directories(netdisplay-control-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(netdisplay-control-test PRIVATE nd_flags PkgConfig::SODIUM)
+        add_test(NAME concurrent-control-sessions
+                 COMMAND netdisplay-control-test $<TARGET_FILE:netdisplay-server>)
+        set_tests_properties(concurrent-control-sessions PROPERTIES TIMEOUT 10)
+    endif()
 endif()
 
 if(NETDISPLAY_BUILD_CLIENT)
     # VA stays dynamic so the client uses the receiver laptop's installed
     # libva + vendor VA driver.
     pkg_check_modules(LIBVA REQUIRED IMPORTED_TARGET libva libva-drm)
-    add_executable(netdisplay-client client.c video_receiver.c)
+    add_executable(netdisplay-client client.c video_receiver.c crypto.c)
     target_include_directories(netdisplay-client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(netdisplay-client PRIVATE
-        nd_flags Threads::Threads ${CMAKE_DL_LIBS})
+        nd_flags Threads::Threads ${CMAKE_DL_LIBS} PkgConfig::SODIUM)
 
     if(NETDISPLAY_STATIC_CLIENT_PREFIX)
         find_path(ND_AV_INCLUDE libavcodec/avcodec.h

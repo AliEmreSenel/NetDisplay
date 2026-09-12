@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <spawn.h>
 #include "proto.h"
+#include "crypto.h"
 #include "display_state.h"
 #include "video_sender.h"
 
@@ -24,10 +25,16 @@ struct host_cfg {
     int port;
     int video_port;
     int input_enabled;
-    int width;
-    int height;
-    int refresh_hz;
     int qp;
+    int max_clients;
+    int max_displays_per_client;
+    int max_width, max_height, max_fps;
+    int frame_encryption; /* 0=off, 1=allowed, 2=required */
+    char psk_file[512];
+    char password_key[ND_KEY_SIZE * 2u + 1u];
+    uint8_t psk[ND_KEY_SIZE];
+    int have_psk;
+    int password_auth;
     char connect_cmd[2048];
     char disconnect_cmd[2048];
 };
@@ -38,10 +45,13 @@ static void cfg_defaults(struct host_cfg *c)
     c->port = NDC_DEFAULT_PORT;
     c->video_port = NDC_DEFAULT_VIDEO_PORT;
     c->input_enabled = 0;
-    c->width = ND_DEFAULT_W;
-    c->height = ND_DEFAULT_H;
-    c->refresh_hz = ND_DEFAULT_FPS;
     c->qp = 24;
+    c->max_clients = 8;
+    c->max_displays_per_client = NDC_MAX_DISPLAYS;
+    c->max_width = 8192;
+    c->max_height = 8192;
+    c->max_fps = 240;
+    c->frame_encryption = 0;
     snprintf(c->output, sizeof(c->output), "netdisplay");
     snprintf(c->brightness_device, sizeof(c->brightness_device), "auto");
 }
@@ -64,10 +74,29 @@ static void load_cfg(const char *path, struct host_cfg *c)
         else if (!strcmp(k, "port")) c->port = atoi(v);
         else if (!strcmp(k, "video_port")) c->video_port = atoi(v);
         else if (!strcmp(k, "input_enabled")) c->input_enabled = atoi(v) != 0;
-        else if (!strcmp(k, "width")) c->width = atoi(v);
-        else if (!strcmp(k, "height")) c->height = atoi(v);
-        else if (!strcmp(k, "refresh_hz")) c->refresh_hz = atoi(v);
         else if (!strcmp(k, "qp")) c->qp = atoi(v);
+        else if (!strcmp(k, "max_clients")) c->max_clients = atoi(v);
+        else if (!strcmp(k, "max_displays_per_client")) c->max_displays_per_client = atoi(v);
+        else if (!strcmp(k, "max_width")) c->max_width = atoi(v);
+        else if (!strcmp(k, "max_height")) c->max_height = atoi(v);
+        else if (!strcmp(k, "max_fps")) c->max_fps = atoi(v);
+        else if (!strcmp(k, "psk_file")) snprintf(c->psk_file, sizeof(c->psk_file), "%s", v);
+        else if (!strcmp(k, "password_key")) {
+            if (strlen(v) >= sizeof(c->password_key)) {
+                fprintf(stderr, "password_key is too long in %s\n", path); exit(2);
+            }
+            snprintf(c->password_key, sizeof(c->password_key), "%s", v);
+        }
+        else if (!strcmp(k, "password") && *v) {
+            fprintf(stderr, "plaintext password is not supported; store password_key from --derive-password-key\n");
+            exit(2);
+        }
+        else if (!strcmp(k, "frame_encryption")) {
+            if (!strcmp(v, "off")) c->frame_encryption = 0;
+            else if (!strcmp(v, "allowed")) c->frame_encryption = 1;
+            else if (!strcmp(v, "required")) c->frame_encryption = 2;
+            else { fprintf(stderr, "invalid frame_encryption in %s\n", path); exit(2); }
+        }
         else if (!strcmp(k, "output")) snprintf(c->output, sizeof(c->output), "%s", v);
         else if (!strcmp(k, "source_output")) snprintf(c->source_output, sizeof(c->source_output), "%s", v);
         else if (!strcmp(k, "brightness_device")) snprintf(c->brightness_device, sizeof(c->brightness_device), "%s", v);
@@ -76,13 +105,79 @@ static void load_cfg(const char *path, struct host_cfg *c)
     }
     fclose(f);
     if (c->port <= 0 || c->port > 65535 || c->video_port <= 0 || c->video_port > 65535 ||
-        c->qp < 0 || c->qp > 51 || !c->output[0] ||
-        c->width <= 0 || c->width > UINT16_MAX || (c->width & 1) ||
-        c->height <= 0 || c->height > UINT16_MAX || (c->height & 1) ||
-        c->refresh_hz <= 0 || c->refresh_hz > UINT16_MAX) {
-        fprintf(stderr, "invalid port/output/QP/video mode in %s\n", path);
+        c->qp < 0 || c->qp > 51 || !c->output[0] || c->max_clients <= 0 ||
+        c->max_clients > 32 || c->max_displays_per_client <= 0 ||
+        c->max_displays_per_client > (int)NDC_MAX_DISPLAYS ||
+        c->max_width <= 0 || c->max_width > UINT16_MAX ||
+        c->max_height <= 0 || c->max_height > UINT16_MAX ||
+        c->max_fps <= 0 || c->max_fps > UINT16_MAX ||
+        c->video_port + c->max_displays_per_client - 1 > 65535) {
+        fprintf(stderr, "invalid port/output/QP/client limit in %s\n", path);
         exit(2);
     }
+    if (c->psk_file[0] && c->password_key[0]) {
+        fprintf(stderr, "configure password_key or psk_file, not both\n");
+        exit(2);
+    }
+    if (c->psk_file[0]) {
+        if (nd_crypto_load_psk(c->psk_file, c->psk) < 0) ndc_die(c->psk_file);
+        c->have_psk = 1;
+    } else if (c->password_key[0]) {
+        if (nd_crypto_key_from_hex(c->psk, c->password_key) < 0) {
+            fprintf(stderr, "password_key must contain exactly 64 hexadecimal characters\n");
+            exit(2);
+        }
+        c->have_psk = 1;
+        c->password_auth = 1;
+    }
+    if (c->frame_encryption && !c->have_psk) {
+        fprintf(stderr, "frame_encryption requires password_key or psk_file\n");
+        exit(2);
+    }
+}
+
+static int derive_password_key_cli(void)
+{
+    char password[1024] = "", confirm[1024] = "";
+    if (isatty(STDIN_FILENO)) {
+        char *p = getpass("Password: ");
+        if (!p || !*p || strlen(p) >= sizeof(password)) goto invalid;
+        snprintf(password, sizeof(password), "%s", p);
+        explicit_bzero(p, strlen(p));
+        p = getpass("Confirm password: ");
+        if (!p || strlen(p) >= sizeof(confirm)) goto invalid;
+        snprintf(confirm, sizeof(confirm), "%s", p);
+        explicit_bzero(p, strlen(p));
+        if (strcmp(password, confirm)) {
+            fprintf(stderr, "passwords do not match\n");
+            goto invalid;
+        }
+    } else {
+        if (!fgets(password, sizeof(password), stdin)) goto invalid;
+        size_t n = strcspn(password, "\r\n");
+        if (!password[n] && !feof(stdin)) goto invalid;
+        password[n] = 0;
+        if (!password[0]) goto invalid;
+    }
+    uint8_t key[ND_KEY_SIZE];
+    char hex[ND_KEY_SIZE * 2u + 1u];
+    if (nd_crypto_password_key(key, password) < 0) {
+        explicit_bzero(password, sizeof(password));
+        explicit_bzero(confirm, sizeof(confirm));
+        return 1;
+    }
+    nd_crypto_key_to_hex(hex, key);
+    puts(hex);
+    explicit_bzero(key, sizeof(key));
+    explicit_bzero(hex, sizeof(hex));
+    explicit_bzero(password, sizeof(password));
+    explicit_bzero(confirm, sizeof(confirm));
+    return 0;
+invalid:
+    fprintf(stderr, "a non-empty password shorter than 1024 bytes is required\n");
+    explicit_bzero(password, sizeof(password));
+    explicit_bzero(confirm, sizeof(confirm));
+    return 2;
 }
 
 static int ui_setup_abs(int fd, unsigned code, int min, int max, int res)
@@ -224,7 +319,7 @@ static int make_listener(const struct host_cfg *cfg)
         fprintf(stderr, "bad listen address %s\n", cfg->listen_addr); exit(2);
     }
     if (bind(s, (struct sockaddr *)&a, sizeof(a)) < 0) ndc_die("bind control");
-    if (listen(s, 4) < 0) ndc_die("listen");
+    if (listen(s, cfg->max_clients) < 0) ndc_die("listen");
     return s;
 }
 
@@ -233,7 +328,15 @@ static int peer_allowed(const struct host_cfg *cfg, const char *ip)
     return !cfg->allowed_peer[0] || !strcmp(cfg->allowed_peer, ip);
 }
 
-static _Atomic int session_active;
+static int valid_wire_name(const char *name)
+{
+    if (!name || !*name) return 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++)
+        if (!isalnum(*p) && *p != '-' && *p != '_' && *p != '.') return 0;
+    return 1;
+}
+
+static _Atomic int session_count;
 
 static int make_discovery_socket(const struct host_cfg *cfg)
 {
@@ -265,7 +368,8 @@ static void *discovery_main(void *opaque)
         if (n != (ssize_t)sizeof(d)) continue;
         if (ntohl(d.magic) != NDC_DISC_MAGIC || ntohs(d.version) != NDC_VERSION ||
             ntohs(d.type) != NDC_DISCOVER) continue;
-        if (atomic_load_explicit(&session_active, memory_order_relaxed)) continue;
+        if (atomic_load_explicit(&session_count, memory_order_relaxed) >=
+            cfg->max_clients) continue;
 
         char peer[INET_ADDRSTRLEN];
         if (!inet_ntop(AF_INET, &from.sin_addr, peer, sizeof(peer))) continue;
@@ -286,79 +390,346 @@ static void *discovery_main(void *opaque)
 }
 
 
-static pid_t spawn_builtin_sender(const struct host_cfg *cfg, const char *peer)
+struct server_stream {
+    uint32_t display_id;
+    uint64_t stream_id;
+    int port, width, height, refresh_hz;
+    char connector[NDC_NAME_MAX];
+    char output[NDC_NAME_MAX];
+    uint8_t key[ND_KEY_SIZE];
+    pid_t video_pid;
+    int lifecycle_started;
+};
+
+struct session_ctx {
+    const struct host_cfg *cfg;
+    struct nd_display_state_source *display_state;
+    int fd;
+    char peer[INET_ADDRSTRLEN];
+    unsigned serial;
+};
+
+static _Atomic unsigned next_session_serial = 1;
+
+static pid_t spawn_builtin_sender(const struct host_cfg *cfg, const char *peer,
+                                  const struct server_stream *st, int encrypted)
 {
+    enum { CHILD_KEY_FD = 196 };
     char portbuf[16], qpbuf[16], widthbuf[16], heightbuf[16], refreshbuf[16];
-    snprintf(portbuf, sizeof(portbuf), "%d", cfg->video_port);
+    char sessionbuf[32], encryptedbuf[8], keyfdbuf[16];
+    snprintf(portbuf, sizeof(portbuf), "%d", st->port);
     snprintf(qpbuf, sizeof(qpbuf), "%d", cfg->qp);
-    snprintf(widthbuf, sizeof(widthbuf), "%d", cfg->width);
-    snprintf(heightbuf, sizeof(heightbuf), "%d", cfg->height);
-    snprintf(refreshbuf, sizeof(refreshbuf), "%d", cfg->refresh_hz);
+    snprintf(widthbuf, sizeof(widthbuf), "%d", st->width);
+    snprintf(heightbuf, sizeof(heightbuf), "%d", st->height);
+    snprintf(refreshbuf, sizeof(refreshbuf), "%d", st->refresh_hz);
+    snprintf(sessionbuf, sizeof(sessionbuf), "%llu",
+             (unsigned long long)st->stream_id);
+    snprintf(encryptedbuf, sizeof(encryptedbuf), "%d", encrypted);
+    snprintf(keyfdbuf, sizeof(keyfdbuf), "%d", encrypted ? CHILD_KEY_FD : -1);
     char *const av[] = {
         (char *)self_program,
         (char *)"--video-sender",
-        (char *)cfg->output,
+        (char *)st->output,
         (char *)peer,
         portbuf,
         qpbuf,
         widthbuf,
         heightbuf,
         refreshbuf,
+        sessionbuf,
+        encryptedbuf,
+        keyfdbuf,
         NULL,
     };
 
+    int keypipe[2] = {-1, -1};
+    posix_spawn_file_actions_t fa;
     posix_spawnattr_t attr;
-    if (posix_spawnattr_init(&attr) != 0) { errno = EINVAL; return -1; }
+    int e = posix_spawn_file_actions_init(&fa);
+    if (e != 0) { errno = e; return -1; }
+    if (encrypted) {
+        if (pipe2(keypipe, O_CLOEXEC) < 0) {
+            posix_spawn_file_actions_destroy(&fa); return -1;
+        }
+        e = posix_spawn_file_actions_adddup2(&fa, keypipe[0], CHILD_KEY_FD);
+        if (!e) e = posix_spawn_file_actions_addclose(&fa, keypipe[1]);
+        if (e) goto fail;
+    }
+    e = posix_spawnattr_init(&attr);
+    if (e != 0) goto fail;
     short flags = POSIX_SPAWN_SETPGROUP;
     (void)posix_spawnattr_setflags(&attr, flags);
     (void)posix_spawnattr_setpgroup(&attr, 0);
 
     pid_t p = -1;
-    int e = posix_spawnp(&p, self_program, NULL, &attr, av, environ);
+    e = posix_spawnp(&p, self_program, &fa, &attr, av, environ);
     posix_spawnattr_destroy(&attr);
-    if (e != 0) { errno = e; return -1; }
+    posix_spawn_file_actions_destroy(&fa);
+    if (keypipe[0] >= 0) close(keypipe[0]);
+    if (e != 0) { if (keypipe[1] >= 0) close(keypipe[1]); errno = e; return -1; }
+    if (encrypted) {
+        size_t off = 0;
+        int ok = 0;
+        while (off < sizeof(st->key)) {
+            ssize_t n = write(keypipe[1], st->key + off, sizeof(st->key) - off);
+            if (n > 0) { off += (size_t)n; continue; }
+            if (n < 0 && errno == EINTR) continue;
+            ok = -1; break;
+        }
+        close(keypipe[1]);
+        if (ok < 0) { ndc_stop_child(&p); return -1; }
+    }
     return p;
+fail:
+    posix_spawn_file_actions_destroy(&fa);
+    if (keypipe[0] >= 0) close(keypipe[0]);
+    if (keypipe[1] >= 0) close(keypipe[1]);
+    errno = e;
+    return -1;
 }
 
-static int wait_for_ready(int fd, int timeout_ms)
+static int recv_expected(int fd, uint16_t expected, void *payload,
+                         uint32_t expected_len)
 {
-    struct pollfd p = { .fd = fd, .events = POLLIN };
-    int pr;
-    do { pr = poll(&p, 1, timeout_ms); } while (pr < 0 && errno == EINTR);
-    if (pr <= 0) { if (pr == 0) errno = ETIMEDOUT; return -1; }
-    uint8_t payload[NDC_MAX_PAYLOAD];
-    uint32_t len = sizeof(payload);
+    uint32_t len = expected_len;
     uint16_t type = 0;
     int r = ndc_recv_msg(fd, &type, payload, &len);
-    if (r <= 0) return -1;
-    if (type != NDC_READY || len != 0) { errno = EPROTO; return -1; }
+    if (r <= 0 || type != expected || len != expected_len) {
+        if (r > 0) errno = EPROTO;
+        return -1;
+    }
     return 0;
 }
 
-static void set_session_env(const struct host_cfg *cfg, const char *peer)
+static int run_stream_hook(const struct host_cfg *cfg, const char *peer,
+                           const struct server_stream *st, const char *cmd)
 {
-    char b[32];
-    setenv("ND_PEER_IP", peer, 1);
-    setenv("ND_OUTPUT", cfg->output, 1);
-    snprintf(b, sizeof(b), "%d", cfg->video_port); setenv("ND_VIDEO_PORT", b, 1);
-    snprintf(b, sizeof(b), "%d", cfg->port); setenv("ND_CONTROL_PORT", b, 1);
-    snprintf(b, sizeof(b), "%d", cfg->width); setenv("ND_WIDTH", b, 1);
-    snprintf(b, sizeof(b), "%d", cfg->height); setenv("ND_HEIGHT", b, 1);
-    snprintf(b, sizeof(b), "%d", cfg->refresh_hz); setenv("ND_REFRESH_HZ", b, 1);
+    char vars[9][256];
+    snprintf(vars[0], sizeof(vars[0]), "ND_PEER_IP=%s", peer);
+    snprintf(vars[1], sizeof(vars[1]), "ND_OUTPUT=%s", st->output);
+    snprintf(vars[2], sizeof(vars[2]), "ND_CONNECTOR=%s", st->connector);
+    snprintf(vars[3], sizeof(vars[3]), "ND_VIDEO_PORT=%d", st->port);
+    snprintf(vars[4], sizeof(vars[4]), "ND_CONTROL_PORT=%d", cfg->port);
+    snprintf(vars[5], sizeof(vars[5]), "ND_WIDTH=%d", st->width);
+    snprintf(vars[6], sizeof(vars[6]), "ND_HEIGHT=%d", st->height);
+    snprintf(vars[7], sizeof(vars[7]), "ND_REFRESH_HZ=%d", st->refresh_hz);
+    snprintf(vars[8], sizeof(vars[8]), "ND_DISPLAY_ID=%u", st->display_id);
+
+    size_t inherited = 0;
+    while (environ[inherited]) inherited++;
+    char **envp = calloc(inherited + 10u, sizeof(*envp));
+    if (!envp) return -1;
+    size_t n = 0;
+    for (size_t i = 0; i < inherited; i++) {
+        int replace = 0;
+        for (size_t v = 0; v < 9; v++) {
+            size_t key_len = (size_t)(strchr(vars[v], '=') - vars[v]);
+            if (!strncmp(environ[i], vars[v], key_len) && environ[i][key_len] == '=') {
+                replace = 1; break;
+            }
+        }
+        if (!replace) envp[n++] = environ[i];
+    }
+    for (size_t v = 0; v < 9; v++) envp[n++] = vars[v];
+    envp[n] = NULL;
+
+    char *const av[] = {(char *)"sh", (char *)"-c", (char *)cmd, NULL};
+    pid_t pid = -1;
+    int e = posix_spawn(&pid, "/bin/sh", NULL, NULL, av, envp);
+    free(envp);
+    if (e) { errno = e; return -1; }
+    int status;
+    while (waitpid(pid, &status, 0) < 0) if (errno != EINTR) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+}
+
+static void *session_main(void *opaque)
+{
+    struct session_ctx *ctx = opaque;
+    const struct host_cfg *cfg = ctx->cfg;
+    int c = ctx->fd;
+    struct server_stream streams[NDC_MAX_DISPLAYS];
+    memset(streams, 0, sizeof(streams));
+    for (unsigned i = 0; i < NDC_MAX_DISPLAYS; i++) streams[i].video_pid = -1;
+    int kbm = -1, tp = -1, attached = 0;
+    unsigned count = 0;
+
+    struct ndc_hello hello;
+    if (recv_expected(c, NDC_HELLO, &hello, sizeof(hello)) < 0) goto done;
+    uint32_t requested = ntohl(hello.flags);
+    unsigned advertised_count = ntohs(hello.display_count);
+    if (!advertised_count ||
+        advertised_count > (unsigned)cfg->max_displays_per_client) goto done;
+    count = advertised_count;
+
+    int wants_encryption = !!(requested & NDC_FLAG_FRAME_ENCRYPT);
+    if ((wants_encryption && cfg->frame_encryption == 0) ||
+        (!wants_encryption && cfg->frame_encryption == 2) ||
+        (wants_encryption && !cfg->have_psk)) {
+        (void)ndc_send_msg(c, NDC_REJECT, NULL, 0);
+        goto done;
+    }
+    int encrypted = wants_encryption && cfg->frame_encryption != 0;
+    struct ndc_challenge challenge = {
+        .flags = htonl((cfg->have_psk ? NDC_FLAG_HAVE_PSK : 0) |
+                       (cfg->password_auth ? NDC_FLAG_PASSWORD : 0) |
+                       (encrypted ? NDC_FLAG_FRAME_ENCRYPT : 0)),
+    };
+    nd_crypto_random(challenge.nonce, sizeof(challenge.nonce));
+    if (ndc_send_msg(c, NDC_CHALLENGE, &challenge, sizeof(challenge)) < 0)
+        goto done;
+    if (cfg->have_psk) {
+        struct ndc_auth got, reply;
+        uint8_t expected[NDC_AUTH_SIZE];
+        if (recv_expected(c, NDC_AUTH, &got, sizeof(got)) < 0) goto done;
+        nd_crypto_proof(expected, cfg->psk, "client", hello.nonce,
+                        challenge.nonce);
+        if (!nd_crypto_verify(got.proof, expected)) {
+            fprintf(stderr, "receiver %s authentication failed\n", ctx->peer);
+            (void)ndc_send_msg(c, NDC_REJECT, NULL, 0);
+            goto done;
+        }
+        nd_crypto_proof(reply.proof, cfg->psk, "server", hello.nonce,
+                        challenge.nonce);
+        if (ndc_send_msg(c, NDC_AUTH, &reply, sizeof(reply)) < 0) goto done;
+    }
+
+    for (unsigned i = 0; i < count; i++) {
+        struct ndc_display d;
+        if (recv_expected(c, NDC_DISPLAY, &d, sizeof(d)) < 0) goto done;
+        d.connector[NDC_NAME_MAX - 1] = 0;
+        struct server_stream *st = &streams[i];
+        st->display_id = ntohl(d.display_id);
+        st->width = ntohs(d.width);
+        st->height = ntohs(d.height);
+        st->refresh_hz = ntohs(d.refresh_hz);
+        st->port = cfg->video_port + (int)i;
+        snprintf(st->connector, sizeof(st->connector), "%s", d.connector);
+        if (!st->display_id || !valid_wire_name(st->connector) || st->width <= 0 ||
+            (st->width & 1) || st->height <= 0 || (st->height & 1) ||
+            st->refresh_hz <= 0 || st->width > cfg->max_width ||
+            st->height > cfg->max_height || st->refresh_hz > cfg->max_fps)
+            goto done;
+        for (unsigned j = 0; j < i; j++)
+            if (streams[j].display_id == st->display_id) goto done;
+        nd_crypto_random(&st->stream_id, sizeof(st->stream_id));
+        if (!st->stream_id) st->stream_id = 1;
+        snprintf(st->output, sizeof(st->output), "%.40s-%u-%u", cfg->output,
+                 ctx->serial, st->display_id);
+        if (encrypted)
+            nd_crypto_stream_key(st->key, cfg->psk, st->stream_id,
+                                 hello.nonce, challenge.nonce);
+        if (cfg->connect_cmd[0]) {
+            int rc = run_stream_hook(cfg, ctx->peer, st, cfg->connect_cmd);
+            if (rc) { fprintf(stderr, "connect_cmd exited %d\n", rc); goto done; }
+        }
+        st->lifecycle_started = 1;
+    }
+
+    int input_allowed = cfg->input_enabled && (requested & NDC_FLAG_WANT_INPUT);
+    if (input_allowed) {
+        kbm = create_kbm_uinput(); tp = create_touchpad_uinput();
+        if (kbm < 0 || tp < 0) {
+            fprintf(stderr, "cannot create uinput devices for %s; input disabled\n",
+                    ctx->peer);
+            destroy_ui(&kbm); destroy_ui(&tp); input_allowed = 0;
+        }
+    }
+    struct ndc_welcome welcome = {
+        .flags = htonl((input_allowed ? NDC_FLAG_INPUT_ALLOWED : 0) |
+                       (encrypted ? NDC_FLAG_FRAME_ENCRYPT : 0)),
+        .display_count = htons((uint16_t)count),
+    };
+    if (ndc_send_msg(c, NDC_WELCOME, &welcome, sizeof(welcome)) < 0) goto done;
+    for (unsigned i = 0; i < count; i++) {
+        struct server_stream *st = &streams[i];
+        struct ndc_stream wire = {
+            .display_id = htonl(st->display_id),
+            .stream_id = nd_hton64(st->stream_id),
+            .video_port = htons((uint16_t)st->port),
+            .width = htons((uint16_t)st->width),
+            .height = htons((uint16_t)st->height),
+            .refresh_hz = htons((uint16_t)st->refresh_hz),
+        };
+        snprintf(wire.output, sizeof(wire.output), "%s", st->output);
+        if (ndc_send_msg(c, NDC_STREAM, &wire, sizeof(wire)) < 0) goto done;
+    }
+
+    for (unsigned ready = 0; ready < count; ready++) {
+        struct ndc_stream_ready r;
+        if (recv_expected(c, NDC_STREAM_READY, &r, sizeof(r)) < 0) goto done;
+        uint32_t id = ntohl(r.display_id);
+        struct server_stream *st = NULL;
+        for (unsigned i = 0; i < count; i++)
+            if (streams[i].display_id == id) { st = &streams[i]; break; }
+        if (!st || st->video_pid > 0) goto done;
+        st->video_pid = spawn_builtin_sender(cfg, ctx->peer, st, encrypted);
+        if (st->video_pid < 0) goto done;
+    }
+
+    if (nd_display_state_attach(ctx->display_state, c) < 0) goto done;
+    attached = 1;
+    fprintf(stderr, "receiver %s running %u display(s), encryption %s\n",
+            ctx->peer, count, encrypted ? "on" : "off");
+    for (;;) {
+        for (unsigned i = 0; i < count; i++) {
+            if (streams[i].video_pid <= 0) continue;
+            int status = 0;
+            if (waitpid(streams[i].video_pid, &status, WNOHANG) == streams[i].video_pid) {
+                streams[i].video_pid = -1;
+                (void)nd_display_state_send(ctx->display_state, c, NDC_STOP, NULL, 0);
+                goto done;
+            }
+        }
+        struct pollfd p = {.fd = c, .events = POLLIN};
+        int pr;
+        do { pr = poll(&p, 1, 500); } while (pr < 0 && errno == EINTR);
+        if (pr < 0 || (pr > 0 && !(p.revents & POLLIN))) goto done;
+        if (!pr) continue;
+        uint8_t b[NDC_MAX_PAYLOAD]; uint32_t len = sizeof(b); uint16_t type;
+        int rr = ndc_recv_msg(c, &type, b, &len);
+        if (rr <= 0) goto done;
+        if (type == NDC_INPUT && input_allowed && len == sizeof(struct ndc_input)) {
+            struct ndc_input in; memcpy(&in, b, sizeof(in));
+            if (inject_event(kbm, tp, &in) < 0) goto done;
+        } else if (type == NDC_PING && len == 0) {
+            if (nd_display_state_send(ctx->display_state, c, NDC_PONG, NULL, 0) < 0)
+                goto done;
+        } else if (!(type == NDC_PONG && len == 0)) goto done;
+    }
+
+done:
+    fprintf(stderr, "receiver %s disconnected\n", ctx->peer);
+    if (attached) nd_display_state_detach(ctx->display_state, c);
+    destroy_ui(&kbm); destroy_ui(&tp);
+    for (unsigned i = 0; i < count; i++) {
+        ndc_stop_child(&streams[i].video_pid);
+        if (streams[i].lifecycle_started && cfg->disconnect_cmd[0])
+            (void)run_stream_hook(cfg, ctx->peer, &streams[i], cfg->disconnect_cmd);
+    }
+    close(c);
+    atomic_fetch_sub_explicit(&session_count, 1, memory_order_relaxed);
+    free(ctx);
+    return NULL;
 }
 
 int main(int argc, char **argv)
 {
     self_program = argv[0];
+    if (nd_crypto_init() < 0) ndc_die("libsodium");
     if (argc == 2 && (!strcmp(argv[1], "--version") || !strcmp(argv[1], "-V"))) {
-        printf("netdisplay-server %s protocol=%u default-video=%ux%u@%u\n",
-               NETDISPLAY_VERSION, NDC_VERSION,
-               ND_DEFAULT_W, ND_DEFAULT_H, ND_DEFAULT_FPS);
+        printf("netdisplay-server %s protocol=%u multi-client/multi-display\n",
+               NETDISPLAY_VERSION, NDC_VERSION);
         return 0;
     }
-    if (argc == 9 && !strcmp(argv[1], "--video-sender"))
+    if (argc == 2 && !strcmp(argv[1], "--derive-password-key"))
+        return derive_password_key_cli();
+    if (argc == 12 && !strcmp(argv[1], "--video-sender"))
         return nd_video_sender_run(argv[2], argv[3], atoi(argv[4]), atoi(argv[5]),
-                                   atoi(argv[6]), atoi(argv[7]), atoi(argv[8]));
+                                   atoi(argv[6]), atoi(argv[7]), atoi(argv[8]),
+                                   strtoull(argv[9], NULL, 10), atoi(argv[10]),
+                                   atoi(argv[11]));
 
     if (argc != 2) {
         fprintf(stderr, "usage: %s SERVER_CONFIG\n", argv[0]);
@@ -376,151 +747,45 @@ int main(int argc, char **argv)
     if (de != 0) { errno = de; ndc_die("pthread_create discovery"); }
     pthread_detach(discovery_thread);
 
-    fprintf(stderr,
-            "netdisplay-server: control/discovery %s:%d, video %dx%d@%d UDP %d, output %s, QP %d, input %s\n",
-            cfg.listen_addr, cfg.port, cfg.width, cfg.height, cfg.refresh_hz,
-            cfg.video_port, cfg.output, cfg.qp,
-            cfg.input_enabled ? "ENABLED" : "disabled");
+    fprintf(stderr, "netdisplay-server: %s:%d, max-clients=%d, video ports %d-%d, encryption=%s\n",
+            cfg.listen_addr, cfg.port, cfg.max_clients, cfg.video_port,
+            cfg.video_port + cfg.max_displays_per_client - 1,
+            cfg.frame_encryption == 2 ? "required" :
+            cfg.frame_encryption == 1 ? "allowed" : "off");
 
     for (;;) {
         struct sockaddr_in pa;
         socklen_t plen = sizeof(pa);
         int c = accept4(ls, (struct sockaddr *)&pa, &plen, SOCK_CLOEXEC);
         if (c < 0) { if (errno == EINTR) continue; ndc_die("accept"); }
-        ndc_set_tcp_opts(c);
-
         char peer[INET_ADDRSTRLEN] = "?";
         (void)inet_ntop(AF_INET, &pa.sin_addr, peer, sizeof(peer));
-        if (!peer_allowed(&cfg, peer)) {
+        int old_count = atomic_fetch_add_explicit(&session_count, 1,
+                                                   memory_order_relaxed);
+        if (!peer_allowed(&cfg, peer) || old_count >= cfg.max_clients) {
             fprintf(stderr, "reject receiver %s\n", peer);
+            atomic_fetch_sub_explicit(&session_count, 1, memory_order_relaxed);
             close(c);
             continue;
         }
-
-        uint8_t payload[NDC_MAX_PAYLOAD];
-        uint32_t len = sizeof(payload);
-        uint16_t type = 0;
-        int rr = ndc_recv_msg(c, &type, payload, &len);
-        if (rr <= 0 || type != NDC_HELLO || len != sizeof(struct ndc_hello)) {
-            fprintf(stderr, "bad HELLO from %s\n", peer);
+        ndc_set_tcp_opts(c);
+        struct session_ctx *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) {
+            atomic_fetch_sub_explicit(&session_count, 1, memory_order_relaxed);
             close(c);
             continue;
         }
-        struct ndc_hello hello;
-        memcpy(&hello, payload, sizeof(hello));
-        uint32_t want = ntohl(hello.flags);
-
-        atomic_store_explicit(&session_active, 1, memory_order_relaxed);
-        set_session_env(&cfg, peer);
-        fprintf(stderr, "receiver %s connected\n", peer);
-
-        int lifecycle_started = 1;
-        if (cfg.connect_cmd[0]) {
-            int rc = ndc_run_sync(cfg.connect_cmd);
-            if (rc) fprintf(stderr, "connect_cmd exited %d\n", rc);
+        ctx->cfg = &cfg; ctx->display_state = &display_state; ctx->fd = c;
+        ctx->serial = atomic_fetch_add_explicit(&next_session_serial, 1,
+                                                memory_order_relaxed);
+        snprintf(ctx->peer, sizeof(ctx->peer), "%s", peer);
+        pthread_t thread;
+        int e = pthread_create(&thread, NULL, session_main, ctx);
+        if (e) {
+            free(ctx); close(c);
+            atomic_fetch_sub_explicit(&session_count, 1, memory_order_relaxed);
+            continue;
         }
-
-        int kbm = -1, tp = -1;
-        int input_allowed = cfg.input_enabled && (want & NDC_FLAG_WANT_INPUT);
-        if (input_allowed) {
-            kbm = create_kbm_uinput();
-            tp = create_touchpad_uinput();
-            if (kbm < 0 || tp < 0) {
-                fprintf(stderr,
-                        "cannot create /dev/uinput devices: %s; input disabled for this session\n",
-                        strerror(errno));
-                destroy_ui(&kbm); destroy_ui(&tp);
-                input_allowed = 0;
-            }
-        }
-
-        struct ndc_welcome wel = {
-            .flags = htonl(input_allowed ? NDC_FLAG_INPUT_ALLOWED : 0),
-            .video_port = htons((uint16_t)cfg.video_port),
-            .width = htons((uint16_t)cfg.width),
-            .height = htons((uint16_t)cfg.height),
-            .refresh_hz = htons((uint16_t)cfg.refresh_hz),
-        };
-
-        pid_t video_pid = -1;
-        int session_ok = 1;
-        if (ndc_send_msg(c, NDC_WELCOME, &wel, sizeof(wel)) < 0) {
-            session_ok = 0;
-        } else if (wait_for_ready(c, 10000) < 0) {
-            fprintf(stderr, "receiver %s did not become video-ready: %s\n",
-                    peer, strerror(errno));
-            session_ok = 0;
-        } else {
-            if (nd_display_state_attach(&display_state, c) < 0) {
-                session_ok = 0;
-            }
-        }
-
-        if (session_ok) {
-            video_pid = spawn_builtin_sender(&cfg, peer);
-            if (video_pid < 0) {
-                perror("fork built-in video sender");
-                (void)nd_display_state_send(&display_state, c, NDC_STOP, NULL, 0);
-                session_ok = 0;
-            } else {
-                fprintf(stderr, "session %s started: built-in video pid %ld, input %s\n",
-                        peer, (long)video_pid, input_allowed ? "allowed" : "off");
-            }
-        }
-
-        while (session_ok) {
-            int st = 0;
-            pid_t wr = waitpid(video_pid, &st, WNOHANG);
-            if (wr == video_pid) {
-                if (WIFEXITED(st))
-                    fprintf(stderr, "built-in video sender exited status=%d\n", WEXITSTATUS(st));
-                else if (WIFSIGNALED(st))
-                    fprintf(stderr, "built-in video sender killed by signal %d\n", WTERMSIG(st));
-                else
-                    fprintf(stderr, "built-in video sender exited\n");
-                video_pid = -1;
-                (void)nd_display_state_send(&display_state, c, NDC_STOP, NULL, 0);
-                break;
-            }
-
-            struct pollfd pfd = { .fd = c, .events = POLLIN };
-            int pr;
-            do { pr = poll(&pfd, 1, 500); } while (pr < 0 && errno == EINTR);
-            if (pr < 0) break;
-            if (pr == 0) continue;
-            if (!(pfd.revents & POLLIN)) break;
-
-            uint8_t b[NDC_MAX_PAYLOAD];
-            uint32_t blen = sizeof(b);
-            uint16_t bt = 0;
-            int r = ndc_recv_msg(c, &bt, b, &blen);
-            if (r <= 0) break;
-            if (bt == NDC_INPUT && input_allowed && blen == sizeof(struct ndc_input)) {
-                struct ndc_input in;
-                memcpy(&in, b, sizeof(in));
-                if (inject_event(kbm, tp, &in) < 0) {
-                    fprintf(stderr, "uinput write failed: %s\n", strerror(errno));
-                    break;
-                }
-            } else if (bt == NDC_PING && blen == 0) {
-                if (nd_display_state_send(&display_state, c, NDC_PONG, NULL, 0) < 0) break;
-            } else if (bt == NDC_PONG && blen == 0) {
-                /* heartbeat reply */
-            } else {
-                fprintf(stderr, "protocol violation from receiver: message type %u\n", bt);
-                break;
-            }
-        }
-
-        fprintf(stderr, "receiver %s disconnected\n", peer);
-        nd_display_state_detach(&display_state, c);
-        destroy_ui(&kbm); destroy_ui(&tp);
-        ndc_stop_child(&video_pid);
-        close(c);
-        if (lifecycle_started && cfg.disconnect_cmd[0]) {
-            int rc = ndc_run_sync(cfg.disconnect_cmd);
-            if (rc) fprintf(stderr, "disconnect_cmd exited %d\n", rc);
-        }
-        atomic_store_explicit(&session_active, 0, memory_order_relaxed);
+        pthread_detach(thread);
     }
 }

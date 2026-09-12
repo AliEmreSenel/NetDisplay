@@ -3,6 +3,9 @@
 host=auto
 port=5001
 
+# With an explicit address, discovery is skipped:
+# host=192.168.1.20
+
 # Optional. Blank = discover on every active non-loopback IPv4 broadcast NIC.
 # Discovery uses 255.255.255.255 and one SO_BINDTODEVICE socket per NIC.
 interface=
@@ -10,6 +13,20 @@ interface=
 # Blank = auto. Override only on unusual multi-GPU systems.
 drm_device=
 vaapi_device=
+
+# Blank means every connected connector, using its preferred mode. Repeat this
+# key to select connectors and request independent stream modes instead:
+# display=eDP-1,1920x1080@60
+# display=HDMI-A-1,2560x1440@144
+
+# If the server has password_key= configured, an interactive client prompts for
+# the password after connecting; it is never stored here or sent over the network.
+# For unattended clients, use the same 32-byte/64-hex PSK file as the server.
+psk_file=
+# frame_encryption=0 keeps the original 24-byte plaintext UDP format and hot
+# path. The server must permit the selected mode. Encryption also requires the
+# prompted password or a configured PSK file.
+frame_encryption=0
 
 # Receiver panel backlight to update from the source: name from
 # /sys/class/backlight, an absolute directory, auto, or none.

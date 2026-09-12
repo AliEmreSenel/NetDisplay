@@ -5,13 +5,22 @@
 
 #define NDC_MAGIC 0x4e444333u /* NDC3 */
 #define NDC_DISC_MAGIC 0x4e444344u /* NDCD */
-#define NDC_VERSION 4u
+#define NDC_VERSION 5u
 #define NDC_DEFAULT_PORT 5001u
 #define NDC_DEFAULT_VIDEO_PORT 5000u
-#define NDC_MAX_PAYLOAD 256u
+#define NDC_MAX_PAYLOAD 512u
+#define NDC_MAX_DISPLAYS 8u
+#define NDC_NAME_MAX 64u
+#define NDC_NONCE_SIZE 16u
+#define NDC_AUTH_SIZE 32u
 
 #define NDC_FLAG_WANT_INPUT    (1u << 0)
 #define NDC_FLAG_INPUT_ALLOWED (1u << 0)
+#define NDC_FLAG_FRAME_ENCRYPT  (1u << 1)
+#define NDC_FLAG_AUTH_REQUIRED  (1u << 2)
+#define NDC_FLAG_PASSWORD       (1u << 3)
+/* Compatibility name for protocol-v5 implementations predating passwords. */
+#define NDC_FLAG_HAVE_PSK       NDC_FLAG_AUTH_REQUIRED
 
 #define NDC_DISPLAY_HAS_DPMS       (1u << 0)
 #define NDC_DISPLAY_HAS_BRIGHTNESS (1u << 1)
@@ -29,6 +38,12 @@ enum ndc_type {
     NDC_STOP    = 6,
     NDC_READY   = 7,
     NDC_DISPLAY_STATE = 8,
+    NDC_CHALLENGE = 9,
+    NDC_AUTH = 10,
+    NDC_DISPLAY = 11,
+    NDC_STREAM = 12,
+    NDC_STREAM_READY = 13,
+    NDC_REJECT = 14,
 };
 
 enum ndc_discovery_type {
@@ -46,15 +61,49 @@ struct __attribute__((packed)) ndc_hdr {
 /* Receiver -> source. Fixed capability request only. No command/string field. */
 struct __attribute__((packed)) ndc_hello {
     uint32_t flags;
+    uint16_t display_count;
+    uint16_t reserved;
+    uint8_t nonce[NDC_NONCE_SIZE];
 };
 
-/* Source -> receiver. Source chooses the actual stream mode. */
-struct __attribute__((packed)) ndc_welcome {
+struct __attribute__((packed)) ndc_challenge {
     uint32_t flags;
+    uint8_t nonce[NDC_NONCE_SIZE];
+};
+
+struct __attribute__((packed)) ndc_auth {
+    uint8_t proof[NDC_AUTH_SIZE];
+};
+
+struct __attribute__((packed)) ndc_display {
+    uint32_t display_id;
+    uint16_t width;
+    uint16_t height;
+    uint16_t refresh_hz;
+    uint16_t reserved;
+    char connector[NDC_NAME_MAX];
+};
+
+/* Source -> receiver. One follows for every advertised display. */
+struct __attribute__((packed)) ndc_stream {
+    uint32_t display_id;
+    uint64_t stream_id;
     uint16_t video_port;
     uint16_t width;
     uint16_t height;
     uint16_t refresh_hz;
+    char output[NDC_NAME_MAX];
+};
+
+struct __attribute__((packed)) ndc_stream_ready {
+    uint32_t display_id;
+};
+
+/* Source -> receiver. Session-wide negotiated capabilities. */
+struct __attribute__((packed)) ndc_welcome {
+    uint32_t flags;
+    uint16_t display_count;
+    uint16_t reserved;
 };
 
 struct __attribute__((packed)) ndc_input {
@@ -87,7 +136,12 @@ struct __attribute__((packed)) ndc_discovery {
 
 _Static_assert(sizeof(struct ndc_hdr) == 12, "ndc_hdr wire size");
 _Static_assert(sizeof(struct ndc_input) == 12, "ndc_input wire size");
-_Static_assert(sizeof(struct ndc_welcome) == 12, "ndc_welcome wire size");
+_Static_assert(sizeof(struct ndc_hello) == 24, "ndc_hello wire size");
+_Static_assert(sizeof(struct ndc_challenge) == 20, "ndc_challenge wire size");
+_Static_assert(sizeof(struct ndc_auth) == 32, "ndc_auth wire size");
+_Static_assert(sizeof(struct ndc_display) == 76, "ndc_display wire size");
+_Static_assert(sizeof(struct ndc_stream) == 84, "ndc_stream wire size");
+_Static_assert(sizeof(struct ndc_welcome) == 8, "ndc_welcome wire size");
 _Static_assert(sizeof(struct ndc_display_state) == 8, "display state wire size");
 _Static_assert(sizeof(struct ndc_discovery) == 16, "discovery wire size");
 
