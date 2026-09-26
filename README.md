@@ -30,7 +30,18 @@ Install for the current user (without replacing an existing configuration):
 ./install.sh --client     # receiver computer
 ```
 
-Pass `--no-start` to install without enabling or starting the user service.
+The installer requires an explicit target and installs only the binary and
+editable configuration by default. It never installs, enables, or starts a
+systemd unit unless you explicitly add `--enable`:
+
+```sh
+./install.sh --server --enable
+./install.sh --client --enable
+```
+
+The client acquires DRM master, so do not use `--enable` while a compositor is
+using the same DRM device. `--no-start` remains accepted for compatibility and
+has no effect because non-starting installation is the default.
 
 Display state synchronization is built into the daemons and protocol. The
 server watches the selected physical Wayland output's DPMS events and host
