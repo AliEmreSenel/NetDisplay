@@ -7,7 +7,6 @@
 #define ND_KEY_SIZE 32u
 #define ND_TAG_SIZE 16u
 
-int nd_crypto_init(void);
 int nd_crypto_load_psk(const char *path, uint8_t key[ND_KEY_SIZE]);
 int nd_crypto_password_key(uint8_t key[ND_KEY_SIZE], const char *password);
 int nd_crypto_key_from_hex(uint8_t key[ND_KEY_SIZE], const char *hex);
