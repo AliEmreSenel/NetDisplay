@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      CC: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential clang cmake ninja-build pkg-config \
+            libsodium-dev libwayland-dev libavcodec-dev libavutil-dev \
+            libdrm-dev libva-dev
+      # Install the protocol XML and pkg-config metadata directly from the
+      # official project, pinned independently of the code under test.
+      - name: Fetch Wayland protocol definitions
+        run: |
+          git init _deps/wlr-protocols
+          git -C _deps/wlr-protocols fetch --depth=1 \
+            https://gitlab.freedesktop.org/wlroots/wlr-protocols.git \
+            bf4fc79abc359eea5a0edec0ac6d4a2b2955f82a
+          git -C _deps/wlr-protocols checkout --detach FETCH_HEAD
+      - name: Install protocol definitions
+        run: |
+          make -C _deps/wlr-protocols install PREFIX="$RUNNER_TEMP/wlr-protocols"
+          echo "PKG_CONFIG_PATH=$RUNNER_TEMP/wlr-protocols/share/pkgconfig" >> "$GITHUB_ENV"
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Build both binaries and tests
+        run: cmake --build build --parallel 2
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure --parallel 2
+      - name: Check binary startup
+        run: |
+          build/netdisplay-server --version
+          build/netdisplay-client --version
+
+  sanitizers:
+    name: Address and undefined-behavior sanitizers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential cmake ninja-build pkg-config libsodium-dev
+      - name: Configure hardware-independent tests
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+            -DNETDISPLAY_BUILD_SERVER=OFF -DNETDISPLAY_BUILD_CLIENT=OFF \
+            '-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer'
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Run tests under sanitizers
+        run: ctest --test-dir build --output-on-failure --parallel 2

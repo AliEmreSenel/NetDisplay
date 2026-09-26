@@ -74,6 +74,12 @@ Install the normal development dependencies for the source machine, then:
 
 `./build-website.sh` is an equivalent, explicit website-build entry point.
 
+GitHub Actions builds both binaries with GCC and Clang on pushes and pull
+requests, runs the crypto, UDP transport, bidirectional probe, and control
+session tests, and checks the hardware-independent tests with AddressSanitizer
+and UndefinedBehaviorSanitizer. These tests use loopback sockets and do not
+require a GPU, compositor, or display. The workflow can also be run manually.
+
 ## Install
 
 Install for the current user (without replacing an existing configuration):
