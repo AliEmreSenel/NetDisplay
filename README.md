@@ -11,6 +11,59 @@ rate, virtual Wayland output, H.264 encoder/decoder pipeline, and UDP port.
 The receiver cannot send arbitrary commands. Source lifecycle commands still
 come only from the source's local config.
 
+## Connection network test
+
+New peers automatically run a roughly 6.5-second UDP test per display before
+starting video. Older peers skip it through capability negotiation. Each
+direction sends random 4, 16, 64, 256, and 1024 KiB frames for half a second
+per size, at the display's refresh rate (capped at 240 Hz), followed by a
+150 ms allowance for replies. Tests run sequentially across displays; they
+measure each path separately, not the aggregate capacity of simultaneous streams.
+
+The probe and video share the ND01 packet header, 1472-byte UDP payload limit,
+batched nonblocking sender, fragmentation, latest-frame reassembly, socket
+buffer sizes, and optional frame encryption. A newer frame abandons an
+unfinished older frame; completed probe frames use a single replaceable slot
+before hashing. Video and probes share that mailbox implementation, with a
+dedicated receive thread independent of the consumer. The test substitutes
+random data and a BLAKE2b-256 hasher for
+the encoder and decoder. Hash replies also use ND01 framing over UDP. Probe
+data and replies in each direction have separate derived encryption keys,
+so probe sequence numbers never reuse video encryption nonces.
+Probe frames also use a separate session ID, and the video receiver accepts
+only its negotiated video session, so late probe packets cannot enter decoding
+or advance the video's frame sequence.
+
+Both logs show each direction's per-size results:
+
+- `offered`: generated payload bitrate during the sending window.
+- `verified`: useful payload bitrate for frames whose returned hashes match.
+  Its observation window includes late verified replies, up to the allowance.
+  `UDP` counts transmitted ND01 headers and encrypted payload, excluding IP,
+  UDP and Ethernet overhead. Neither number is a link-speed claim.
+- `complete`, `lost-or-late`, `aborted`, `producer-skipped`, and `corrupt`:
+  completion consistency, missed replies, stale transmissions, missed
+  generation slots, and incorrect hashes. A missing reply can mean a dropped
+  frame, an overwritten hasher slot, a lost ACK, or a reply past the allowance.
+- `RTT-p50/p95`: local monotonic time from frame submission through hash reply.
+  `transport-RTT` subtracts the peer's time from complete frame reception to
+  hash reply preparation, including decryption, hasher wait, and hashing.
+  It still includes serialization, local socket/scheduling delays, and both
+  network directions. `variation-p95-p50` describes latency spread.
+- `receive-assembly-p95`: peer time from the first received fragment to the
+  complete frame. Live video also reports useful receive bitrate and mean
+  receive assembly time every second.
+
+These are software timing measurements. No subtraction of timestamps from
+different hosts is used. Exact one-way source-to-receiver latency and
+capture-to-display latency require additional clock synchronization and
+capture/presentation instrumentation; receive assembly time is neither of
+those. The probe excludes codec and display costs and does not automatically
+change encoder settings. UDP loss is reported without blocking video startup;
+setup or control-protocol failure disconnects and follows the normal retry path.
+The test server uses a temporary UDP source port, with the same negotiated
+destination port that video will use on the client.
+
 ## Build
 
 Install the normal development dependencies for the source machine, then:

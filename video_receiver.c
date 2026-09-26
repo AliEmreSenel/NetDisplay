@@ -27,6 +27,7 @@
 
 #include "common.h"
 #include "crypto.h"
+#include "frame_transport.h"
 #include "proto.h"
 #include "video_receiver.h"
 
@@ -665,200 +666,33 @@ static int decode_one(AVCodecContext *dec, const uint8_t *data, uint32_t size,
 
 static int seq_newer(uint32_t a, uint32_t b) { return (int32_t)(a - b) > 0; }
 
-struct frame_mailbox {
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
-  uint8_t *latest_buf;
-  uint32_t latest_size;
-  uint32_t latest_seq;
-  uint64_t latest_session;
-  int have_latest;
-};
-
-struct rx_stats {
-  _Atomic unsigned long long complete;
-  _Atomic unsigned long long partial_drop;
-  _Atomic unsigned long long latest_overwrite;
-  _Atomic unsigned long long bad;
-  _Atomic unsigned long long dup;
-};
-
 struct rx_ctx {
   int sock;
-  struct frame_mailbox *mailbox;
+  struct nd_latest *mailbox;
   uint8_t *assembly_buf;
-  struct rx_stats *stats;
+  struct nd_rx_stats *stats;
   int encrypted;
+  uint64_t wire_session;
   uint8_t key[ND_KEY_SIZE];
 };
 
-static void mailbox_publish(struct rx_ctx *rx, uint32_t size, uint32_t seq,
-                            uint64_t session) {
-  struct frame_mailbox *m = rx->mailbox;
-
-  pthread_mutex_lock(&m->mutex);
-
-  /* There is exactly one pending completed frame. If decode has not taken
-   * it yet, replace it with the newer one. No completed-frame FIFO exists. */
-  if (m->have_latest)
-    atomic_fetch_add_explicit(&rx->stats->latest_overwrite, 1,
-                              memory_order_relaxed);
-
-  uint8_t *old_latest = m->latest_buf;
-  m->latest_buf = rx->assembly_buf;
-  rx->assembly_buf = old_latest;
-
-  m->latest_size = size;
-  m->latest_seq = seq;
-  m->latest_session = session;
-  m->have_latest = 1;
-
-  pthread_cond_signal(&m->cond);
-  pthread_mutex_unlock(&m->mutex);
-}
-
 static void *rx_thread_main(void *opaque) {
   struct rx_ctx *rx = opaque;
-  struct rx_stats *st = rx->stats;
-
-  uint64_t got[(ND_MAX_FRAGS + 63u) / 64u];
-  memset(got, 0, sizeof(got));
-
-  uint64_t current_session = 0;
-  uint64_t previous_session = 0;
-  uint32_t current_seq = 0;
-  uint32_t current_size = 0;
-  uint16_t current_frag_count = 0;
-  uint32_t got_count = 0;
-  int assembling = 0;
-
+  struct nd_assembly assembly = {.expected_session = rx->wire_session};
   uint8_t datagram[ND_UDP_PAYLOAD_MAX];
-
   for (;;) {
-    ssize_t n;
-    do {
-      n = recv(rx->sock, datagram, sizeof(datagram), MSG_TRUNC);
-    } while (n < 0 && errno == EINTR);
-
-    if (n < 0) {
-      perror("recv");
-      return NULL;
-    }
-    if (n < (ssize_t)sizeof(struct nd_hdr) || n > (ssize_t)sizeof(datagram)) {
-      atomic_fetch_add_explicit(&st->bad, 1, memory_order_relaxed);
-      continue;
-    }
-
-    struct nd_hdr h;
-    memcpy(&h, datagram, sizeof(h));
-    if (ntohl(h.magic) != ND_MAGIC) {
-      atomic_fetch_add_explicit(&st->bad, 1, memory_order_relaxed);
-      continue;
-    }
-
-    uint64_t sess = nd_ntoh64(h.session);
-    uint32_t seq = ntohl(h.seq);
-    uint16_t frag = ntohs(h.frag);
-    uint16_t frag_count = ntohs(h.frag_count);
-    uint32_t frame_size = ntohl(h.frame_size);
-
-    if (!sess || !frag_count || frame_size == 0 ||
-        frame_size > (rx->encrypted ? ND_MAX_WIRE_FRAME : ND_MAX_FRAME)) {
-      atomic_fetch_add_explicit(&st->bad, 1, memory_order_relaxed);
-      continue;
-    }
-
-    uint32_t expected_count = (frame_size + ND_FRAG_DATA - 1u) / ND_FRAG_DATA;
-    if (expected_count != frag_count || frag >= frag_count) {
-      atomic_fetch_add_explicit(&st->bad, 1, memory_order_relaxed);
-      continue;
-    }
-
-    size_t off = (size_t)frag * ND_FRAG_DATA;
-    size_t want = frame_size - off;
-    if (want > ND_FRAG_DATA)
-      want = ND_FRAG_DATA;
-    if ((size_t)n != sizeof(h) + want) {
-      atomic_fetch_add_explicit(&st->bad, 1, memory_order_relaxed);
-      continue;
-    }
-
-    /* Session IDs are opaque, not ordered. Remember the immediately
-     * retired session so late UDP packets from a restarted sender cannot
-     * switch us back to the old stream. */
-    if (current_session == 0 ||
-        (sess != current_session && sess != previous_session)) {
-      if (assembling && got_count != current_frag_count)
-        atomic_fetch_add_explicit(&st->partial_drop, 1, memory_order_relaxed);
-      previous_session = current_session;
-      current_session = sess;
-      current_seq = seq;
-      current_size = frame_size;
-      current_frag_count = frag_count;
-      got_count = 0;
-      memset(got, 0, sizeof(got));
-      assembling = 1;
-      fprintf(stderr, "new sender session %016llx seq=%u\n",
-              (unsigned long long)sess, seq);
-    } else if (sess == previous_session) {
-      continue;
-    } else if (!assembling) {
-      if (!seq_newer(seq, current_seq))
-        continue;
-      current_seq = seq;
-      current_size = frame_size;
-      current_frag_count = frag_count;
-      got_count = 0;
-      memset(got, 0, sizeof(got));
-      assembling = 1;
-    } else if (seq != current_seq) {
-      if (!seq_newer(seq, current_seq))
-        continue;
-
-      /* The instant a newer IDR appears, an incomplete older IDR is
-       * worthless. Drop it instead of waiting for missing fragments. */
-      if (got_count != current_frag_count)
-        atomic_fetch_add_explicit(&st->partial_drop, 1, memory_order_relaxed);
-
-      current_seq = seq;
-      current_size = frame_size;
-      current_frag_count = frag_count;
-      got_count = 0;
-      memset(got, 0, sizeof(got));
-    } else if (frame_size != current_size || frag_count != current_frag_count) {
-      atomic_fetch_add_explicit(&st->bad, 1, memory_order_relaxed);
-      continue;
-    }
-
-    uint64_t mask = 1ULL << (frag & 63u);
-    uint64_t *word = &got[frag >> 6];
-    if (*word & mask) {
-      atomic_fetch_add_explicit(&st->dup, 1, memory_order_relaxed);
-      continue;
-    }
-
-    memcpy(rx->assembly_buf + off, datagram + sizeof(h), want);
-    *word |= mask;
-    got_count++;
-
-    if (got_count == current_frag_count) {
-      if (rx->encrypted) {
-        size_t plain_size = 0;
-        if (nd_crypto_decrypt(rx->assembly_buf, &plain_size, rx->assembly_buf,
-                              current_size, rx->key, current_session,
-                              current_seq) < 0 ||
-            plain_size == 0 || plain_size > ND_MAX_FRAME) {
-          atomic_fetch_add_explicit(&st->bad, 1, memory_order_relaxed);
-          assembling = 0;
-          continue;
-        }
-        current_size = (uint32_t)plain_size;
-      }
-      memset(rx->assembly_buf + current_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
-      atomic_fetch_add_explicit(&st->complete, 1, memory_order_relaxed);
-
-      mailbox_publish(rx, current_size, current_seq, current_session);
-      assembling = 0;
+    ssize_t n = recv(rx->sock, datagram, sizeof(datagram), MSG_TRUNC);
+    if (n < 0 && errno == EINTR) continue;
+    if (n < 0) { perror("recv"); return NULL; }
+    if (nd_frame_receive(&assembly, rx->stats, rx->assembly_buf, datagram,
+                          (size_t)n, rx->encrypted ? rx->key : NULL)) {
+      memset(rx->assembly_buf + assembly.size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+      struct nd_frame_slot frame = {.buffer = rx->assembly_buf,
+          .size = assembly.size, .seq = assembly.seq, .session = assembly.session,
+          .first_ns = assembly.first_ns, .complete_ns = assembly.complete_ns};
+      if (nd_latest_publish(rx->mailbox, &frame))
+        atomic_fetch_add(&rx->stats->latest_overwrite, 1);
+      rx->assembly_buf = frame.buffer;
     }
   }
 }
@@ -866,7 +700,7 @@ static void *rx_thread_main(void *opaque) {
 int main_receiver(int port, int fd, int connector_id, int requested_crtc,
                   const char *va_path, const char *interface_name, int ready_fd,
                   int width, int height, int refresh_hz, int state_fd,
-                  int encrypted, int key_fd) {
+                  int encrypted, int key_fd, uint64_t wire_session) {
   if (port <= 0 || port > 65535 || width <= 0 || width > UINT16_MAX ||
       (width & 1) || height <= 0 || height > UINT16_MAX || (height & 1) ||
       refresh_hz <= 0 || refresh_hz > UINT16_MAX) {
@@ -1005,23 +839,18 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
   if (!assembly_buf || !latest_buf || !decode_buf)
     die("av_malloc compressed buffers");
 
-  struct frame_mailbox mailbox = {
-      .mutex = PTHREAD_MUTEX_INITIALIZER,
-      .cond = PTHREAD_COND_INITIALIZER,
-      .latest_buf = latest_buf,
-      .latest_size = 0,
-      .latest_seq = 0,
-      .latest_session = 0,
-      .have_latest = 0,
-  };
+  struct nd_latest mailbox;
+  int mailbox_error = nd_latest_init(&mailbox, latest_buf);
+  if (mailbox_error) { errno = mailbox_error; die("init latest frame"); }
 
-  struct rx_stats stats = {0};
+  struct nd_rx_stats stats = {0};
   struct rx_ctx rx = {
       .sock = s,
       .mailbox = &mailbox,
       .assembly_buf = assembly_buf,
       .stats = &stats,
       .encrypted = encrypted,
+      .wire_session = wire_session,
   };
   if (encrypted) {
     if (key_fd < 0 || ndc_read_full(key_fd, rx.key, sizeof(rx.key)) <= 0)
@@ -1068,25 +897,11 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
   unsigned long long last_skipped = 0;
 
   for (;;) {
-    uint32_t size, seq;
-    uint64_t session;
-
-    pthread_mutex_lock(&mailbox.mutex);
-    while (!mailbox.have_latest)
-      pthread_cond_wait(&mailbox.cond, &mailbox.mutex);
-
-    /* Swap decoder ownership with the single latest slot. RX can
-     * immediately publish/overwrite another completed frame while decode
-     * works on this one. */
-    uint8_t *tmp = decode_buf;
-    decode_buf = mailbox.latest_buf;
-    mailbox.latest_buf = tmp;
-
-    size = mailbox.latest_size;
-    seq = mailbox.latest_seq;
-    session = mailbox.latest_session;
-    mailbox.have_latest = 0;
-    pthread_mutex_unlock(&mailbox.mutex);
+    struct nd_frame_slot frame = {.buffer = decode_buf};
+    nd_latest_take(&mailbox, &frame, 1);
+    decode_buf = frame.buffer;
+    uint32_t size = frame.size, seq = frame.seq;
+    uint64_t session = frame.session;
 
     if (have_last_seq && session == last_session && seq_newer(seq, last_seq)) {
       uint32_t delta = seq - last_seq;
@@ -1119,6 +934,9 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
     double dt = (double)(now.tv_sec - stat0.tv_sec) +
                 (double)(now.tv_nsec - stat0.tv_nsec) / 1e9;
     if (dt >= 1.0) {
+      static unsigned long long last_bytes, last_assembly;
+      unsigned long long bytes = atomic_load(&stats.complete_bytes);
+      unsigned long long assembly = atomic_load(&stats.assembly_ns);
       unsigned long long complete =
           atomic_load_explicit(&stats.complete, memory_order_relaxed);
       unsigned long long partial =
@@ -1132,11 +950,17 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
 
       fprintf(stderr,
               "rx %.1f complete/s  displayed %.1f/s  latest-dropped %llu  "
-              "partial-dropped %llu  seq-skipped %llu  bad %llu  dup %llu\n",
+              "partial-dropped %llu  seq-skipped %llu  bad %llu  dup %llu  "
+              "useful %.1f Mbit/s  receive-assembly %.3f ms\n",
               (complete - last_complete) / dt,
               (displayed - last_displayed) / dt, overwrite - last_overwrite,
               partial - last_partial, skipped_before_decode - last_skipped,
-              bad - last_bad, dup - last_dup);
+              bad - last_bad, dup - last_dup,
+              (bytes - last_bytes) * 8.0 / dt / 1e6,
+              complete == last_complete ? 0.0 :
+              (assembly - last_assembly) / 1e6 / (complete - last_complete));
+      last_bytes = bytes;
+      last_assembly = assembly;
 
       last_complete = complete;
       last_displayed = displayed;

@@ -31,8 +31,8 @@ tar -czf "$SITE/source.tar.gz" -C "$ROOT" \
     CMakeLists.txt \
     client.c video_receiver.c video_receiver.h \
     server.c display_state.c display_state.h video_sender.c video_sender.h \
-    crypto.c crypto.h \
-    tests/crypto_test.c tests/control_test.c \
+    crypto.c crypto.h frame_transport.c frame_transport.h network_test.c network_test.h \
+    tests/crypto_test.c tests/control_test.c tests/transport_test.c tests/network_test.c \
     proto.h control_proto.h common.h
 
 printf '\nBuilt site directory: %s\n' "$SITE"

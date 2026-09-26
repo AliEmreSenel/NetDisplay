@@ -4,6 +4,7 @@
 #include "common.h"
 #include "crypto.h"
 #include "proto.h"
+#include "network_test.h"
 #include "video_receiver.h"
 #include <dirent.h>
 #include <dlfcn.h>
@@ -794,7 +795,7 @@ static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int master_fd,
                                     const struct nd_local_display *display,
                                     int video_port, int width, int height,
                                     int refresh_hz, const char *ifname,
-                                    int encrypted,
+                                    int encrypted, uint64_t wire_session,
                                     const uint8_t key[ND_KEY_SIZE],
                                     int *ready_fd, int *state_fd) {
   int pfd[2], state_pipe[2], keypipe[2] = {-1, -1};
@@ -821,7 +822,8 @@ static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int master_fd,
   };
   char portbuf[16], drmfdbuf[16], connectorbuf[16], crtcbuf[16];
   char readybuf[16], statebuf[16], widthbuf[16], heightbuf[16], refreshbuf[16];
-  char encryptedbuf[8], keyfdbuf[16];
+  char encryptedbuf[8], keyfdbuf[16], sessionbuf[32];
+  snprintf(sessionbuf, sizeof(sessionbuf), "%llx", (unsigned long long)wire_session);
   snprintf(portbuf, sizeof(portbuf), "%d", video_port);
   snprintf(drmfdbuf, sizeof(drmfdbuf), "%d", CHILD_DRM_FD);
   snprintf(connectorbuf, sizeof(connectorbuf), "%u", display->connector_id);
@@ -849,6 +851,7 @@ static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int master_fd,
       statebuf,
       encryptedbuf,
       keyfdbuf,
+      sessionbuf,
       NULL,
   };
 
@@ -1006,11 +1009,12 @@ int main(int argc, char **argv) {
            NETDISPLAY_VERSION, NDC_VERSION);
     return 0;
   }
-  if (argc == 15 && !strcmp(argv[1], "--video-receiver"))
+  if ((argc == 15 || argc == 16) && !strcmp(argv[1], "--video-receiver"))
     return main_receiver(atoi(argv[2]), atoi(argv[3]), atoi(argv[4]),
                          atoi(argv[5]), argv[6], argv[7], atoi(argv[8]),
                          atoi(argv[9]), atoi(argv[10]), atoi(argv[11]),
-                         atoi(argv[12]), atoi(argv[13]), atoi(argv[14]));
+                         atoi(argv[12]), atoi(argv[13]), atoi(argv[14]),
+                         argc == 16 ? strtoull(argv[15], NULL, 16) : 0);
   if (argc > 2) {
     fprintf(stderr, "usage: %s [CLIENT_CONFIG]\n", argv[0]);
     return 1;
@@ -1093,6 +1097,7 @@ int main(int argc, char **argv) {
     }
     struct ndc_hello hello = {
         .flags = htonl((cfg.want_input ? NDC_FLAG_WANT_INPUT : 0) |
+                       NDC_FLAG_NETWORK_TEST |
                        (cfg.have_psk ? NDC_FLAG_HAVE_PSK : 0) |
                        (cfg.frame_encryption ? NDC_FLAG_FRAME_ENCRYPT : 0)),
         .display_count = htons((uint16_t)display_count),
@@ -1196,6 +1201,22 @@ int main(int argc, char **argv) {
           !st->height || (st->height & 1) || !st->refresh_hz)
         session_ok = 0;
     }
+    if (session_ok && (ntohl(welcome.flags) & NDC_FLAG_NETWORK_TEST)) {
+      for (int i = 0; session_ok && i < display_count; i++) {
+        struct client_stream_runtime *st = &streams[i];
+        uint8_t key[ND_KEY_SIZE] = {0};
+        if (cfg.frame_encryption)
+          nd_crypto_stream_key(key, cfg.psk, st->stream_id, hello.nonce,
+                               challenge.nonce);
+        fprintf(stderr, "testing network for display %u (%d Hz)\n",
+                st->display_id, st->refresh_hz);
+        if (nd_network_test(s, 0, host_ip, st->port, discovered_if,
+                             st->refresh_hz, st->stream_id,
+                             cfg.frame_encryption ? key : NULL) < 0)
+          session_ok = 0;
+        memset(key, 0, sizeof(key));
+      }
+    }
     for (int i = 0; session_ok && i < display_count; i++) {
       struct client_stream_runtime *st = &streams[i];
       uint8_t key[ND_KEY_SIZE] = {0};
@@ -1205,7 +1226,8 @@ int main(int argc, char **argv) {
       int ready_fd = -1;
       st->pid = spawn_builtin_receiver(&cfg, master_fd, st->display, st->port,
                                        st->width, st->height, st->refresh_hz,
-                                       discovered_if, cfg.frame_encryption, key,
+                                       discovered_if, cfg.frame_encryption,
+                                       st->stream_id, key,
                                        &ready_fd, &st->state_fd);
       if (st->pid < 0 || wait_receiver_ready(st->pid, ready_fd, 10000) < 0) {
         if (ready_fd >= 0)

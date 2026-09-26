@@ -27,6 +27,7 @@
 
 #include "common.h"
 #include "crypto.h"
+#include "frame_transport.h"
 #include "proto.h"
 #include "screencopy.h"
 #include "video_sender.h"
@@ -367,114 +368,25 @@ static int tx_has_newer(void) {
  * thread can notice a newer complete frame and abandon this one rather than
  * ever building video latency.  Return 0=complete, 1=aborted for newer,
  * -1=send error. */
+static int tx_obsolete(void *unused) {
+  (void)unused;
+  return tx_has_newer();
+}
+
 static int send_encoded_frame(const uint8_t *data, size_t size, uint32_t seq) {
-  if (size == 0 || size > ND_MAX_FRAME) {
-    atomic_fetch_add_explicit(&stat_oversize, 1, memory_order_relaxed);
+  if (!size || size > ND_MAX_FRAME) {
+    atomic_fetch_add(&stat_oversize, 1);
     return -1;
   }
-
-  if (frame_encrypted) {
-    size_t encrypted_size = 0;
-    if (nd_crypto_encrypt(encrypted_frame, &encrypted_size, data, size,
-                          frame_key, session_id, seq) < 0)
-      return -1;
-    data = encrypted_frame;
-    size = encrypted_size;
-  }
-
-  uint32_t count32 = (uint32_t)((size + ND_FRAG_DATA - 1u) / ND_FRAG_DATA);
-  if (count32 == 0 || count32 > UINT16_MAX) {
-    atomic_fetch_add_explicit(&stat_oversize, 1, memory_order_relaxed);
-    return -1;
-  }
-  uint16_t frag_count = (uint16_t)count32;
-
-#define BATCH 32u
-  struct nd_hdr hdr[BATCH];
-  struct iovec iov[BATCH][2];
-  struct mmsghdr msg[BATCH];
-
-  uint32_t frag = 0;
-  while (frag < frag_count) {
-    /* A newer complete frame exists.  Stop spending wire time on an old
-     * independent IDR; the receiver will discard its incomplete tail. */
-    if (tx_has_newer())
-      return 1;
-
-    uint32_t nmsg = frag_count - frag;
-    if (nmsg > BATCH)
-      nmsg = BATCH;
-    memset(msg, 0, sizeof(msg));
-
-    for (uint32_t j = 0; j < nmsg; j++) {
-      uint32_t f = frag + j;
-      size_t off = (size_t)f * ND_FRAG_DATA;
-      size_t left = size - off;
-      size_t payload = left < ND_FRAG_DATA ? left : ND_FRAG_DATA;
-
-      hdr[j].magic = htonl(ND_MAGIC);
-      hdr[j].session = nd_hton64(session_id);
-      hdr[j].seq = htonl(seq);
-      hdr[j].frag = htons((uint16_t)f);
-      hdr[j].frag_count = htons(frag_count);
-      hdr[j].frame_size = htonl((uint32_t)size);
-
-      iov[j][0].iov_base = &hdr[j];
-      iov[j][0].iov_len = sizeof(hdr[j]);
-      iov[j][1].iov_base = (void *)(data + off);
-      iov[j][1].iov_len = payload;
-      msg[j].msg_hdr.msg_iov = iov[j];
-      msg[j].msg_hdr.msg_iovlen = 2;
-    }
-
-    uint32_t done = 0;
-    while (done < nmsg) {
-      int n = sendmmsg(udp_fd, msg + done, nmsg - done, MSG_DONTWAIT);
-      if (n > 0) {
-        unsigned long long bytes = 0;
-        for (int k = 0; k < n; k++)
-          bytes += msg[done + (uint32_t)k].msg_len;
-        atomic_fetch_add_explicit(&stat_tx_bytes, bytes, memory_order_relaxed);
-        done += (uint32_t)n;
-
-        if (tx_has_newer())
-          return 1;
-        continue;
-      }
-
-      if (n < 0 && errno == EINTR)
-        continue;
-
-      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        atomic_fetch_add_explicit(&stat_eagain, 1, memory_order_relaxed);
-        if (tx_has_newer())
-          return 1;
-
-        /* Wait at most 1 ms for NIC/qdisc space, then re-check the
-         * latest slot.  This is TX-thread waiting, never capture-thread
-         * waiting. */
-        struct pollfd pfd = {.fd = udp_fd, .events = POLLOUT};
-        int pr;
-        do {
-          pr = poll(&pfd, 1, 1);
-        } while (pr < 0 && errno == EINTR);
-        if (pr < 0) {
-          atomic_fetch_add_explicit(&stat_tx_errors, 1, memory_order_relaxed);
-          return -1;
-        }
-        continue;
-      }
-
-      atomic_fetch_add_explicit(&stat_tx_errors, 1, memory_order_relaxed);
-      return -1;
-    }
-
-    frag += nmsg;
-  }
-
-  atomic_fetch_add_explicit(&stat_tx_frames, 1, memory_order_relaxed);
-  return 0;
-#undef BATCH
+  struct nd_tx_stats stats = {0};
+  int rc = nd_frame_send(udp_fd, session_id, seq, data, size,
+                         frame_encrypted ? frame_key : NULL, encrypted_frame,
+                         tx_obsolete, NULL, &stats);
+  atomic_fetch_add(&stat_tx_bytes, stats.bytes);
+  atomic_fetch_add(&stat_eagain, stats.eagain);
+  atomic_fetch_add(&stat_tx_errors, stats.errors);
+  if (!rc) atomic_fetch_add(&stat_tx_frames, 1);
+  return rc;
 }
 
 static void publish_encoded_packet(AVPacket *pkt, uint32_t seq) {

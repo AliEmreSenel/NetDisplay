@@ -3,6 +3,7 @@
 #include "common.h"
 #include "crypto.h"
 #include "proto.h"
+#include "network_test.h"
 
 #include <signal.h>
 #include <sys/stat.h>
@@ -59,6 +60,7 @@ static int open_session(int port, uint32_t display_id, int advertises_key,
     return -1;
   struct ndc_hello hello = {
       .flags = htonl((advertises_key ? NDC_FLAG_HAVE_PSK : 0) |
+                     (advertises_key ? NDC_FLAG_NETWORK_TEST : 0) |
                      NDC_FLAG_FRAME_ENCRYPT),
       .display_count = htons(1),
   };
@@ -97,6 +99,16 @@ static int open_session(int port, uint32_t display_id, int advertises_key,
   if (recv_type(fd, NDC_STREAM, &stream, sizeof(stream)) < 0 ||
       ntohl(stream.display_id) != display_id || !nd_ntoh64(stream.stream_id))
     goto fail;
+  if (!!(ntohl(welcome.flags) & NDC_FLAG_NETWORK_TEST) != !!advertises_key)
+    goto fail;
+  if (advertises_key) {
+    uint8_t key[ND_KEY_SIZE];
+    nd_crypto_stream_key(key, psk, nd_ntoh64(stream.stream_id), hello.nonce,
+                         challenge.nonce);
+    if (nd_network_test(fd, 0, "127.0.0.1", ntohs(stream.video_port), NULL,
+                         ntohs(stream.refresh_hz), nd_ntoh64(stream.stream_id),
+                         key) < 0) goto fail;
+  }
   return fd;
 fail:
   close(fd);

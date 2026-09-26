@@ -50,7 +50,7 @@ if(NETDISPLAY_BUILD_SERVER)
         DEPENDS "${SC_XML}")
 
     add_executable(netdisplay-server
-        server.c display_state.c video_sender.c crypto.c
+        server.c display_state.c video_sender.c crypto.c frame_transport.c network_test.c
         "${CMAKE_CURRENT_BINARY_DIR}/screencopy.c"
         "${CMAKE_CURRENT_BINARY_DIR}/screencopy.h"
         "${CMAKE_CURRENT_BINARY_DIR}/output-power.c"
@@ -63,17 +63,26 @@ if(NETDISPLAY_BUILD_SERVER)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(netdisplay-transport-test tests/transport_test.c frame_transport.c crypto.c)
+    target_include_directories(netdisplay-transport-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(netdisplay-transport-test PRIVATE nd_flags PkgConfig::SODIUM Threads::Threads)
+    add_test(NAME frame-transport COMMAND netdisplay-transport-test)
+    add_executable(netdisplay-network-test tests/network_test.c network_test.c frame_transport.c crypto.c)
+    target_include_directories(netdisplay-network-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(netdisplay-network-test PRIVATE nd_flags PkgConfig::SODIUM Threads::Threads)
+    add_test(NAME bidirectional-network-probe COMMAND netdisplay-network-test)
+    set_tests_properties(bidirectional-network-probe PROPERTIES TIMEOUT 30)
     add_executable(netdisplay-crypto-test tests/crypto_test.c crypto.c)
     target_include_directories(netdisplay-crypto-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(netdisplay-crypto-test PRIVATE nd_flags PkgConfig::SODIUM)
     add_test(NAME crypto-roundtrip COMMAND netdisplay-crypto-test)
     if(NETDISPLAY_BUILD_SERVER)
-        add_executable(netdisplay-control-test tests/control_test.c crypto.c)
+        add_executable(netdisplay-control-test tests/control_test.c crypto.c network_test.c frame_transport.c)
         target_include_directories(netdisplay-control-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-        target_link_libraries(netdisplay-control-test PRIVATE nd_flags PkgConfig::SODIUM)
+        target_link_libraries(netdisplay-control-test PRIVATE nd_flags PkgConfig::SODIUM Threads::Threads)
         add_test(NAME concurrent-control-sessions
                  COMMAND netdisplay-control-test $<TARGET_FILE:netdisplay-server>)
-        set_tests_properties(concurrent-control-sessions PROPERTIES TIMEOUT 10)
+        set_tests_properties(concurrent-control-sessions PROPERTIES TIMEOUT 20)
     endif()
 endif()
 
@@ -81,7 +90,7 @@ if(NETDISPLAY_BUILD_CLIENT)
     # VA stays dynamic so the client uses the receiver laptop's installed
     # libva + vendor VA driver.
     pkg_check_modules(LIBVA REQUIRED IMPORTED_TARGET libva libva-drm)
-    add_executable(netdisplay-client client.c video_receiver.c crypto.c)
+    add_executable(netdisplay-client client.c video_receiver.c crypto.c frame_transport.c network_test.c)
     target_include_directories(netdisplay-client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(netdisplay-client PRIVATE
         nd_flags Threads::Threads ${CMAKE_DL_LIBS} PkgConfig::SODIUM)

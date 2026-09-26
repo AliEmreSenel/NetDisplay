@@ -19,6 +19,7 @@
 #define NDC_FLAG_FRAME_ENCRYPT (1u << 1)
 #define NDC_FLAG_AUTH_REQUIRED (1u << 2)
 #define NDC_FLAG_PASSWORD (1u << 3)
+#define NDC_FLAG_NETWORK_TEST (1u << 4)
 /* Compatibility name for protocol-v5 implementations predating passwords. */
 #define NDC_FLAG_HAVE_PSK NDC_FLAG_AUTH_REQUIRED
 
@@ -44,6 +45,10 @@ enum ndc_type {
   NDC_STREAM = 12,
   NDC_STREAM_READY = 13,
   NDC_REJECT = 14,
+  NDC_TEST_PORT = 15,
+  NDC_TEST_READY = 16,
+  NDC_TEST_DONE = 17,
+  NDC_TEST_REPORT = 18,
 };
 
 enum ndc_discovery_type {

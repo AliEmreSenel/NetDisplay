@@ -5,6 +5,7 @@
 #include "crypto.h"
 #include "display_state.h"
 #include "proto.h"
+#include "network_test.h"
 #include "video_sender.h"
 #include <dirent.h>
 #include <linux/input.h>
@@ -751,6 +752,7 @@ static void *session_main(void *opaque) {
   }
   struct ndc_welcome welcome = {
       .flags = htonl((input_allowed ? NDC_FLAG_INPUT_ALLOWED : 0) |
+                     (requested & NDC_FLAG_NETWORK_TEST) |
                      (encrypted ? NDC_FLAG_FRAME_ENCRYPT : 0)),
       .display_count = htons((uint16_t)count),
   };
@@ -769,6 +771,18 @@ static void *session_main(void *opaque) {
     snprintf(wire.output, sizeof(wire.output), "%s", st->output);
     if (ndc_send_msg(c, NDC_STREAM, &wire, sizeof(wire)) < 0)
       goto done;
+  }
+
+  if (requested & NDC_FLAG_NETWORK_TEST) {
+    for (unsigned i = 0; i < count; i++) {
+      struct server_stream *st = &streams[i];
+      if (nd_network_test(c, 1, ctx->peer, st->port, NULL, st->refresh_hz,
+                           st->stream_id, encrypted ? st->key : NULL) < 0) {
+        fprintf(stderr, "network test failed for %s display %u\n",
+                ctx->peer, st->display_id);
+        goto done;
+      }
+    }
   }
 
   for (unsigned ready = 0; ready < count; ready++) {

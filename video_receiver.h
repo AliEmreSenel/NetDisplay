@@ -18,5 +18,5 @@ int nd_video_open_displays(const char *requested_drm, int *master_fd,
 int main_receiver(int video_port, int drm_fd, int connector_id, int crtc_id,
                   const char *vaapi_device, const char *interface_name,
                   int ready_fd, int width, int height, int refresh_hz,
-                  int state_fd, int encrypted, int key_fd);
+                  int state_fd, int encrypted, int key_fd, uint64_t wire_session);
 #endif
