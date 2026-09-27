@@ -25,7 +25,7 @@ target_compile_options(nd_flags INTERFACE
 
 # Compile shared transport and authentication code once for all consumers.
 add_library(nd_common STATIC
-    src/crypto.c src/frame_transport.c src/network_test.c)
+    src/crypto.c src/frame_transport.c src/network_test.c src/power_state.c src/power_native.c)
 target_include_directories(nd_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(nd_common PUBLIC nd_flags Threads::Threads PkgConfig::SODIUM)
 

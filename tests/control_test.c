@@ -60,7 +60,7 @@ static int open_session(int port, uint32_t display_id, int advertises_key,
     return -1;
   struct ndc_hello hello = {
       .flags = htonl((advertises_key ? NDC_FLAG_HAVE_PSK : 0) |
-                     (advertises_key ? NDC_FLAG_NETWORK_TEST : 0) |
+                     (advertises_key ? NDC_FLAG_NETWORK_TEST | NDC_FLAG_POWER_INFO : 0) |
                      NDC_FLAG_FRAME_ENCRYPT),
       .display_count = htons(1),
   };
@@ -98,6 +98,8 @@ static int open_session(int port, uint32_t display_id, int advertises_key,
   struct ndc_stream stream;
   if (recv_type(fd, NDC_STREAM, &stream, sizeof(stream)) < 0 ||
       ntohl(stream.display_id) != display_id || !nd_ntoh64(stream.stream_id))
+    goto fail;
+  if (!!(ntohl(welcome.flags) & NDC_FLAG_POWER_INFO) != !!advertises_key)
     goto fail;
   if (!!(ntohl(welcome.flags) & NDC_FLAG_NETWORK_TEST) != !!advertises_key)
     goto fail;

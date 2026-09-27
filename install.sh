@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install NetDisplay for the current user.  No root access is required.
+# Install NetDisplay for the current user. DKMS setup is explicitly opt-in.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -8,15 +8,17 @@ CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
 SYSTEMD_USER_DIR=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
 MODE=
 ENABLE=0
+POWER_MODULE=0
 
 usage() {
-    printf '%s\n' "usage: $0 (--server|--client|--all) [--prefix PATH] [--enable]"
+    printf '%s\n' "usage: $0 (--server|--client|--all) [--prefix PATH] [--enable] [--with-power-module]"
 }
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --server|--client|--all) MODE=${1#--} ;;
         --prefix) shift; [ "$#" -gt 0 ] || { usage >&2; exit 2; }; PREFIX=$1 ;;
         --enable) ENABLE=1 ;;
+        --with-power-module) POWER_MODULE=1 ;;
         # Kept harmless for scripts written for older installers.  Services
         # are opt-in now, so this is already the default.
         --no-start) ENABLE=0 ;;
@@ -30,6 +32,11 @@ done
 
 if [ "$ENABLE" -eq 1 ] && [ "$PREFIX" != "$HOME/.local" ]; then
     printf '%s\n' 'A custom --prefix cannot use --enable (the bundled user units use %h/.local).' >&2
+    exit 2
+fi
+
+if [ "$POWER_MODULE" -eq 1 ] && [ "$MODE" = client ]; then
+    printf '%s\n' '--with-power-module is only valid with --server or --all.' >&2
     exit 2
 fi
 
@@ -61,6 +68,20 @@ if [ "$MODE" = all ] || [ "$MODE" = client ]; then
     fi
     [ -e "$CONFIG_HOME/netdisplay/client.conf" ] || \
         install -m 0644 "$ROOT/config/client.conf.example" "$CONFIG_HOME/netdisplay/client.conf"
+fi
+
+if [ "$POWER_MODULE" -eq 1 ]; then
+    ACCOUNT=$(id -un)
+    if [ "$(id -u)" -eq 0 ]; then
+        "$ROOT/kernel/install.sh" "$ACCOUNT"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$ROOT/kernel/install.sh" "$ACCOUNT"
+    elif command -v doas >/dev/null 2>&1; then
+        doas "$ROOT/kernel/install.sh" "$ACCOUNT"
+    else
+        printf '%s\n' 'DKMS setup requires sudo or doas; run kernel/install.sh as root with your server account.' >&2
+        exit 1
+    fi
 fi
 
 if [ "$ENABLE" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then

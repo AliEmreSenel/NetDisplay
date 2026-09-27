@@ -11,6 +11,29 @@ rate, virtual Wayland output, H.264 encoder/decoder pipeline, and UDP port.
 The receiver cannot send arbitrary commands. Source lifecycle commands still
 come only from the source's local config.
 
+## Remote batteries and chargers
+
+Clients report available battery and charger attributes every two seconds.
+With the optional `kernel/` DKMS module, the server exposes them as native Linux
+power devices, including charging status, charger online state, percentage,
+energy, voltage, current, temperature, health, cycles, and device identity when
+reported by the hardware. Original attributes are also readable in each
+virtual supply's `remote/` directory. Devices are scoped to the remote computer
+and disappear on disconnect or after 15 seconds without updates.
+
+Opt into module setup when installing the server:
+
+```sh
+./install.sh --server --with-power-module
+```
+
+DKMS and matching kernel headers must be installed first. Only this explicit
+option invokes administrator setup; normal server/client installation stays
+unprivileged. See [kernel/README.md](kernel/README.md) for permissions, Secure
+Boot, available attributes, limits, tests, and removal. `power_devices=0` on the
+server or `send_power=0` on the client disables the feature. Video continues if
+the module is unavailable. Older peers skip reporting through negotiation.
+
 ## Connection network test
 
 New peers automatically run a roughly 6.5-second UDP test per display before
@@ -93,7 +116,9 @@ Debug flags; optimizations are selected by the build type.
 
 GitHub Actions builds both binaries with GCC and Clang, runs the crypto, UDP
 transport, bidirectional probe, and control session tests, and checks the
-hardware-independent tests with AddressSanitizer and UndefinedBehaviorSanitizer.
+hardware-independent tests (including power telemetry) with AddressSanitizer
+and UndefinedBehaviorSanitizer. A separate job checks the DKMS build and loads
+the module in a disposable VM to verify native power-device behavior.
 It also checks shell scripts and builds both client-only and server-only
 fallbacks from the packaged source archive. These checks require no GPU,
 compositor, or display. The workflow can also be run manually.
@@ -105,6 +130,7 @@ compositor, or display. The workflow can also be run manually.
 - `tests/`: hardware-independent tests and their CMake targets.
 - `config/`: example client and server configurations.
 - `packaging/`: systemd user units and the uinput udev rule.
+- `kernel/`: optional native battery/charger module, DKMS setup, and VM tests.
 - `site/`: downloadable shell launcher.
 - `build/` and `dist/`: ignored local build and website output.
 

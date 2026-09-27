@@ -48,7 +48,7 @@ jobs:
           make -C _deps/wlr-protocols install PREFIX="$RUNNER_TEMP/wlr-protocols"
           echo "PKG_CONFIG_PATH=$RUNNER_TEMP/wlr-protocols/share/pkgconfig" >> "$GITHUB_ENV"
       - name: Check shell scripts
-        run: shellcheck build-site.sh build-website.sh install.sh site/index.html
+        run: shellcheck build-site.sh build-website.sh install.sh site/index.html kernel/install.sh kernel/tests/run-vm.sh
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - name: Build both binaries and tests
@@ -101,3 +101,32 @@ jobs:
         run: cmake --build build --parallel 2
       - name: Run tests under sanitizers
         run: ctest --test-dir build --output-on-failure --parallel 2
+
+  kernel:
+    name: DKMS and native power-device VM tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install kernel build and VM dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential dkms linux-image-generic linux-headers-generic \
+            qemu-system-x86 cpio gzip upower dbus
+      - name: Build with DKMS and test in a disposable guest
+        run: |
+          image=$(sudo find /boot -maxdepth 1 -name 'vmlinuz-*-generic' | sort -V | tail -n 1)
+          release=${image##*/}
+          release=${release#vmlinuz-}
+          sudo install -d /usr/src/netdisplay-power-0.1.0
+          sudo install -m 0644 kernel/netdisplay_power.c kernel/netdisplay_power.h \
+            kernel/Makefile kernel/dkms.conf /usr/src/netdisplay-power-0.1.0/
+          sudo dkms add -m netdisplay-power -v 0.1.0
+          sudo dkms build -m netdisplay-power -v 0.1.0 -k "$release"
+          sudo cp "$image" "$RUNNER_TEMP/netdisplay-test-kernel"
+          sudo chmod a+r "$RUNNER_TEMP/netdisplay-test-kernel"
+          KERNEL_RELEASE="$release" KERNEL_IMAGE="$RUNNER_TEMP/netdisplay-test-kernel" \
+            ./kernel/tests/run-vm.sh

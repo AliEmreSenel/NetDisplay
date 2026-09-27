@@ -8,6 +8,7 @@ endfunction()
 nd_add_test(netdisplay-transport-test transport_test.c frame-transport)
 nd_add_test(netdisplay-network-test network_test.c bidirectional-network-probe)
 nd_add_test(netdisplay-crypto-test crypto_test.c crypto-roundtrip)
+nd_add_test(netdisplay-power-test power_test.c power-telemetry)
 
 if(NETDISPLAY_BUILD_SERVER)
     nd_add_test(netdisplay-control-test control_test.c concurrent-control-sessions

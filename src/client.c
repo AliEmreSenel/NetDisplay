@@ -5,6 +5,7 @@
 #include "crypto.h"
 #include "proto.h"
 #include "network_test.h"
+#include "power_state.h"
 #include "video_receiver.h"
 #include <dirent.h>
 #include <dlfcn.h>
@@ -37,6 +38,7 @@ struct client_cfg {
   char backlight_device[256];
   int port;
   int want_input;
+  int send_power;
   int grab_input;
   int reconnect_ms;
   int frame_encryption;
@@ -70,6 +72,7 @@ static void cfg_defaults(struct client_cfg *c) {
   snprintf(c->host, sizeof(c->host), "auto");
   c->port = NDC_DEFAULT_PORT;
   c->want_input = 1;
+  c->send_power = 1;
   c->grab_input = 0;
   c->reconnect_ms = 500;
   snprintf(c->backlight_device, sizeof(c->backlight_device), "auto");
@@ -132,6 +135,8 @@ static void load_cfg(const char *path, struct client_cfg *c, int required) {
       c->port = atoi(v);
     else if (!strcmp(k, "interface"))
       snprintf(c->interface, sizeof(c->interface), "%s", v);
+    else if (!strcmp(k, "send_power"))
+      c->send_power = atoi(v) != 0;
     else if (!strcmp(k, "want_input"))
       c->want_input = atoi(v) != 0;
     else if (!strcmp(k, "grab_input"))
@@ -1098,6 +1103,7 @@ int main(int argc, char **argv) {
     struct ndc_hello hello = {
         .flags = htonl((cfg.want_input ? NDC_FLAG_WANT_INPUT : 0) |
                        NDC_FLAG_NETWORK_TEST |
+                       (cfg.send_power ? NDC_FLAG_POWER_INFO : 0) |
                        (cfg.have_psk ? NDC_FLAG_HAVE_PSK : 0) |
                        (cfg.frame_encryption ? NDC_FLAG_FRAME_ENCRYPT : 0)),
         .display_count = htons((uint16_t)display_count),
@@ -1251,7 +1257,26 @@ int main(int argc, char **argv) {
         pthread_create(&input_thread, NULL, input_main, &ictx) == 0)
       have_input_thread = 1;
 
+    struct nd_power_snapshot *power = NULL;
+    if (session_ok && cfg.send_power && (ntohl(welcome.flags) & NDC_FLAG_POWER_INFO))
+      power = calloc(1, sizeof(*power));
+    uint64_t next_power_ms = 0;
+    int power_read_warned = 0;
     while (session_ok) {
+      uint64_t now_ms = nd_power_now_ms();
+      if (power && now_ms >= next_power_ms) {
+        next_power_ms = now_ms + ND_POWER_INTERVAL_MS;
+        if (nd_power_read("/sys/class/power_supply", power) == 0) {
+          power_read_warned = 0;
+          pthread_mutex_lock(&ictx.send_mutex);
+          int sent = nd_power_send(s, power);
+          pthread_mutex_unlock(&ictx.send_mutex);
+          if (sent < 0) break;
+        } else if (!power_read_warned) {
+          fprintf(stderr, "cannot read power supplies: %s\n", strerror(errno));
+          power_read_warned = 1;
+        }
+      }
       for (int i = 0; i < display_count; i++) {
         int status = 0;
         if (streams[i].pid > 0 &&
@@ -1314,6 +1339,7 @@ int main(int argc, char **argv) {
       } else
         break;
     }
+    free(power);
     atomic_store(&ictx.running, 0);
     shutdown(s, SHUT_RDWR);
     if (have_input_thread)

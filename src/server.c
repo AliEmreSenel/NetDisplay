@@ -6,6 +6,7 @@
 #include "display_state.h"
 #include "proto.h"
 #include "network_test.h"
+#include "power_native.h"
 #include "video_sender.h"
 #include <dirent.h>
 #include <linux/input.h>
@@ -30,6 +31,7 @@ struct host_cfg {
   int port;
   int video_port;
   int input_enabled;
+  int power_devices;
   int qp;
   int max_clients;
   int max_displays_per_client;
@@ -49,6 +51,7 @@ static void cfg_defaults(struct host_cfg *c) {
   c->port = NDC_DEFAULT_PORT;
   c->video_port = NDC_DEFAULT_VIDEO_PORT;
   c->input_enabled = 0;
+  c->power_devices = 1;
   c->qp = 24;
   c->max_clients = 8;
   c->max_displays_per_client = NDC_MAX_DISPLAYS;
@@ -83,6 +86,8 @@ static void load_cfg(const char *path, struct host_cfg *c) {
       c->port = atoi(v);
     else if (!strcmp(k, "video_port"))
       c->video_port = atoi(v);
+    else if (!strcmp(k, "power_devices"))
+      c->power_devices = atoi(v) != 0;
     else if (!strcmp(k, "input_enabled"))
       c->input_enabled = atoi(v) != 0;
     else if (!strcmp(k, "qp"))
@@ -656,6 +661,9 @@ static void *session_main(void *opaque) {
     streams[i].video_pid = -1;
   int kbm = -1, tp = -1, attached = 0;
   unsigned count = 0;
+  struct nd_power_rx power_rx = {0};
+  struct nd_power_sink power_sink;
+  nd_power_sink_init(&power_sink);
 
   struct ndc_hello hello;
   if (recv_expected(c, NDC_HELLO, &hello, sizeof(hello)) < 0)
@@ -753,6 +761,7 @@ static void *session_main(void *opaque) {
   struct ndc_welcome welcome = {
       .flags = htonl((input_allowed ? NDC_FLAG_INPUT_ALLOWED : 0) |
                      (requested & NDC_FLAG_NETWORK_TEST) |
+                     (cfg->power_devices ? requested & NDC_FLAG_POWER_INFO : 0) |
                      (encrypted ? NDC_FLAG_FRAME_ENCRYPT : 0)),
       .display_count = htons((uint16_t)count),
   };
@@ -809,6 +818,9 @@ static void *session_main(void *opaque) {
   fprintf(stderr, "receiver %s running %u display(s), encryption %s\n",
           ctx->peer, count, encrypted ? "on" : "off");
   for (;;) {
+    uint64_t now_ms = nd_power_now_ms();
+    nd_power_sink_expire(&power_sink, now_ms);
+    if (power_rx.pending && now_ms - power_rx.started_ms > 5000) goto done;
     for (unsigned i = 0; i < count; i++) {
       if (streams[i].video_pid <= 0)
         continue;
@@ -840,6 +852,15 @@ static void *session_main(void *opaque) {
       memcpy(&in, b, sizeof(in));
       if (inject_event(kbm, tp, &in) < 0)
         goto done;
+    } else if (type >= NDC_POWER_BEGIN && type <= NDC_POWER_END &&
+               cfg->power_devices && (requested & NDC_FLAG_POWER_INFO)) {
+      struct nd_power_snapshot *snapshot = NULL;
+      int result = nd_power_receive(&power_rx, type, b, len, &snapshot);
+      if (result < 0) goto done;
+      if (result > 0) {
+        (void)nd_power_sink_update(&power_sink, snapshot, ctx->peer, ctx->serial);
+        free(snapshot);
+      }
     } else if (type == NDC_PING && len == 0) {
       if (nd_display_state_send(ctx->display_state, c, NDC_PONG, NULL, 0) < 0)
         goto done;
@@ -848,6 +869,8 @@ static void *session_main(void *opaque) {
   }
 
 done:
+  nd_power_rx_clear(&power_rx);
+  nd_power_sink_clear(&power_sink);
   fprintf(stderr, "receiver %s disconnected\n", ctx->peer);
   if (attached)
     nd_display_state_detach(ctx->display_state, c);

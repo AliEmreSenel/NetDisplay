@@ -46,3 +46,7 @@ input_enabled=0
 # to ordinary identifier characters if changing this command.
 connect_cmd=hyprctl output create headless "$ND_OUTPUT"; hyprctl eval "hl.monitor({ output = '$ND_OUTPUT', mode = '${ND_WIDTH}x${ND_HEIGHT}@${ND_REFRESH_HZ}', position = 'auto', scale = 1 })"
 disconnect_cmd=hyprctl output remove "$ND_OUTPUT"
+
+# Mirror receiver batteries and chargers as native device-scoped power supplies.
+# Requires the optional netdisplay-power DKMS module; otherwise video still works.
+power_devices=1

@@ -24,7 +24,7 @@ cp "$ROOT/config/client.conf.example" "$ROOT/config/server.conf.example" "$SITE/
 
 # The fallback archive is deliberately just the source needed to CMake-build.
 # No release manifests, version folders, container files, or generated output.
-tar -czf "$SITE/source.tar.gz" -C "$ROOT" CMakeLists.txt src tests
+tar -czf "$SITE/source.tar.gz" -C "$ROOT" CMakeLists.txt src tests kernel/netdisplay_power.h
 
 printf '\nBuilt site directory: %s\n' "$SITE"
 printf 'Serve %s as https://nd.myc.li/\n' "$SITE"

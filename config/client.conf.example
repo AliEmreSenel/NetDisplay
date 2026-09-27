@@ -36,3 +36,7 @@ backlight_device=auto
 want_input=1
 grab_input=0
 reconnect_ms=500
+
+# Send batteries, chargers, and their available read-only attributes to the source.
+# Older sources skip this through capability negotiation.
+send_power=1

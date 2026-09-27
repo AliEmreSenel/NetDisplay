@@ -20,6 +20,7 @@
 #define NDC_FLAG_AUTH_REQUIRED (1u << 2)
 #define NDC_FLAG_PASSWORD (1u << 3)
 #define NDC_FLAG_NETWORK_TEST (1u << 4)
+#define NDC_FLAG_POWER_INFO (1u << 5)
 /* Compatibility name for protocol-v5 implementations predating passwords. */
 #define NDC_FLAG_HAVE_PSK NDC_FLAG_AUTH_REQUIRED
 
@@ -49,6 +50,10 @@ enum ndc_type {
   NDC_TEST_READY = 16,
   NDC_TEST_DONE = 17,
   NDC_TEST_REPORT = 18,
+  NDC_POWER_BEGIN = 19,
+  NDC_POWER_DEVICE = 20,
+  NDC_POWER_PROPERTY = 21,
+  NDC_POWER_END = 22,
 };
 
 enum ndc_discovery_type {
