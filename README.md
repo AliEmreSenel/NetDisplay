@@ -1,6 +1,6 @@
 # NetDisplay - simple build/deploy
 
-Two binaries in the source tree:
+Two binaries built under `build/`:
 
 - `netdisplay-server` - Hyprland/NVENC source
 - `netdisplay-client` - DRM/KMS + VAAPI receiver
@@ -66,19 +66,86 @@ destination port that video will use on the client.
 
 ## Build
 
-Install the normal development dependencies for the source machine, then:
+Install CMake 3.20 or newer, a C compiler, pkg-config, and the development
+dependencies listed below. The server also needs `wayland-client`,
+`wayland-scanner`, and `wlr-protocols`.
+
+```sh
+make          # configure and build both programs and tests
+make test     # build and run the hardware-independent tests
+```
+
+The equivalent CMake commands are:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure --parallel 2
+```
+
+Use `NETDISPLAY_BUILD_SERVER=OFF` or `NETDISPLAY_BUILD_CLIENT=OFF` as CMake
+options to build only the other program. Set both to `OFF` to build just the
+hardware-independent tests with libsodium. Debug builds use CMake's normal
+Debug flags; optimizations are selected by the build type.
+
+`make` accepts `BUILD_DIR` and `JOBS`. The build and installer scripts accept
+`NETDISPLAY_BUILD_DIR` and `NETDISPLAY_JOBS` (default: 2).
+
+GitHub Actions builds both binaries with GCC and Clang, runs the crypto, UDP
+transport, bidirectional probe, and control session tests, and checks the
+hardware-independent tests with AddressSanitizer and UndefinedBehaviorSanitizer.
+It also checks shell scripts and builds both client-only and server-only
+fallbacks from the packaged source archive. These checks require no GPU,
+compositor, or display. The workflow can also be run manually.
+
+## Source layout
+
+- `src/`: C sources and internal headers; shared transport/authentication code
+  is compiled once and linked into the binaries and tests.
+- `tests/`: hardware-independent tests and their CMake targets.
+- `config/`: example client and server configurations.
+- `packaging/`: systemd user units and the uinput udev rule.
+- `site/`: downloadable shell launcher.
+- `build/` and `dist/`: ignored local build and website output.
+
+## Package the website
 
 ```sh
 ./build-site.sh
 ```
 
-`./build-website.sh` is an equivalent, explicit website-build entry point.
+`./build-website.sh`, `make site`, and `make website` use the same entry point.
+Builds are incremental; `NETDISPLAY_SITE_DIR` overrides the default `dist/`
+output directory.
 
-GitHub Actions builds both binaries with GCC and Clang on pushes and pull
-requests, runs the crypto, UDP transport, bidirectional probe, and control
-session tests, and checks the hardware-independent tests with AddressSanitizer
-and UndefinedBehaviorSanitizer. These tests use loopback sockets and do not
-require a GPU, compositor, or display. The workflow can also be run manually.
+`./build-site.sh` runs CMake, builds both programs, and creates only:
+
+```text
+dist/
+├── index.html                  # shell script served at /
+├── client.conf.example
+├── server.conf.example
+├── netdisplay-client-x86_64   # or the current architecture
+├── netdisplay-server-x86_64
+└── source.tar.gz               # C/CMake fallback for either mode
+```
+
+There are no versions, manifests, release directories, Docker files, or
+release metadata.
+
+If you already have a prefix containing static `libavcodec.a`, `libavutil.a`
+and `libdrm.a`, build the receiver mostly-static with:
+
+```sh
+NETDISPLAY_STATIC_CLIENT_PREFIX=/path/to/prefix ./build-site.sh
+```
+
+`libva`/`libva-drm`, glibc and the vendor VA driver stay dynamic and come from
+the receiver laptop.
+
+Without `NETDISPLAY_STATIC_CLIENT_PREFIX`, the prebuilt client uses the normal
+libraries from the build machine. The source fallback still makes the setup
+usable when that ELF is incompatible.
 
 ## Install
 
@@ -112,35 +179,6 @@ systemd-logind brightness API, so synchronization does not require running the
 client as root. GammaStep also sees the
 dynamically-created `netdisplay-*` Wayland outputs and applies its gamma changes
 to that output normally.
-
-This runs CMake, builds both programs, and creates only:
-
-```text
-dist/
-├── index.html                  # shell script served at /
-├── client.conf.example
-├── server.conf.example
-├── netdisplay-client-x86_64   # or the current architecture
-├── netdisplay-server-x86_64
-└── source.tar.gz               # C/CMake fallback for either mode
-```
-
-There are no versions, manifests, release directories, Docker files, or
-release metadata.
-
-If you already have a prefix containing static `libavcodec.a`, `libavutil.a`
-and `libdrm.a`, build the receiver mostly-static with:
-
-```sh
-NETDISPLAY_STATIC_CLIENT_PREFIX=/path/to/prefix ./build-site.sh
-```
-
-`libva`/`libva-drm`, glibc and the vendor VA driver stay dynamic and come from
-the receiver laptop.
-
-Without `NETDISPLAY_STATIC_CLIENT_PREFIX`, the prebuilt client uses the normal
-libraries from the build machine. The source fallback still makes the setup
-usable when that ELF is incompatible.
 
 ## Serve
 
@@ -184,7 +222,7 @@ https://nd.myc.li/source.tar.gz
 and performs the plain fallback:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNETDISPLAY_BUILD_SERVER=OFF
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DNETDISPLAY_BUILD_SERVER=OFF
 cmake --build build -j
 ```
 
@@ -232,7 +270,7 @@ exists, and otherwise uses its built-in defaults. Start with the example:
 
 ```sh
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/netdisplay"
-cp client.conf.example \
+cp config/client.conf.example \
   "${XDG_CONFIG_HOME:-$HOME/.config}/netdisplay/client.conf"
 ```
 

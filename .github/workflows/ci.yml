@@ -31,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential clang cmake ninja-build pkg-config \
+            build-essential clang cmake ninja-build pkg-config shellcheck \
             libsodium-dev libwayland-dev libavcodec-dev libavutil-dev \
             libdrm-dev libva-dev
       # Install the protocol XML and pkg-config metadata directly from the
@@ -47,6 +47,8 @@ jobs:
         run: |
           make -C _deps/wlr-protocols install PREFIX="$RUNNER_TEMP/wlr-protocols"
           echo "PKG_CONFIG_PATH=$RUNNER_TEMP/wlr-protocols/share/pkgconfig" >> "$GITHUB_ENV"
+      - name: Check shell scripts
+        run: shellcheck build-site.sh build-website.sh install.sh site/index.html
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - name: Build both binaries and tests
@@ -57,6 +59,22 @@ jobs:
         run: |
           build/netdisplay-server --version
           build/netdisplay-client --version
+      - name: Package website and check source fallbacks
+        if: matrix.compiler == 'gcc'
+        run: |
+          ./build-site.sh
+          mkdir -p "$RUNNER_TEMP/netdisplay-source"
+          tar -xzf dist/source.tar.gz -C "$RUNNER_TEMP/netdisplay-source"
+          for mode in client server; do
+            server=OFF
+            client=OFF
+            if [ "$mode" = server ]; then server=ON; else client=ON; fi
+            cmake -S "$RUNNER_TEMP/netdisplay-source" -B "build/fallback-$mode" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+              -DNETDISPLAY_BUILD_SERVER="$server" -DNETDISPLAY_BUILD_CLIENT="$client"
+            cmake --build "build/fallback-$mode" --parallel 2
+            "build/fallback-$mode/netdisplay-$mode" --version
+          done
 
   sanitizers:
     name: Address and undefined-behavior sanitizers

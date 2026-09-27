@@ -2,7 +2,7 @@
 # Install NetDisplay for the current user.  No root access is required.
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PREFIX=${PREFIX:-"$HOME/.local"}
 CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
 SYSTEMD_USER_DIR=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
@@ -38,29 +38,29 @@ build_server=OFF
 build_client=OFF
 [ "$MODE" = all ] || [ "$MODE" = server ] && build_server=ON
 [ "$MODE" = all ] || [ "$MODE" = client ] && build_client=ON
-cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
+cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
     -DNETDISPLAY_BUILD_SERVER="$build_server" \
     -DNETDISPLAY_BUILD_CLIENT="$build_client"
-cmake --build "$BUILD" -j"${NETDISPLAY_JOBS:-2}"
+cmake --build "$BUILD" --parallel "${NETDISPLAY_JOBS:-2}"
 
 install -d "$PREFIX/bin" "$CONFIG_HOME/netdisplay"
 if [ "$MODE" = all ] || [ "$MODE" = server ]; then
     install -m 0755 "$BUILD/netdisplay-server" "$PREFIX/bin/netdisplay-server"
     if [ "$ENABLE" -eq 1 ]; then
         install -d "$SYSTEMD_USER_DIR"
-        install -m 0644 "$ROOT/netdisplay-server.service" "$SYSTEMD_USER_DIR/netdisplay-server.service"
+        install -m 0644 "$ROOT/packaging/systemd/netdisplay-server.service" "$SYSTEMD_USER_DIR/netdisplay-server.service"
     fi
     [ -e "$CONFIG_HOME/netdisplay/server.conf" ] || \
-        install -m 0644 "$ROOT/server.conf.example" "$CONFIG_HOME/netdisplay/server.conf"
+        install -m 0644 "$ROOT/config/server.conf.example" "$CONFIG_HOME/netdisplay/server.conf"
 fi
 if [ "$MODE" = all ] || [ "$MODE" = client ]; then
     install -m 0755 "$BUILD/netdisplay-client" "$PREFIX/bin/netdisplay-client"
     if [ "$ENABLE" -eq 1 ]; then
         install -d "$SYSTEMD_USER_DIR"
-        install -m 0644 "$ROOT/netdisplay-client.service" "$SYSTEMD_USER_DIR/netdisplay-client.service"
+        install -m 0644 "$ROOT/packaging/systemd/netdisplay-client.service" "$SYSTEMD_USER_DIR/netdisplay-client.service"
     fi
     [ -e "$CONFIG_HOME/netdisplay/client.conf" ] || \
-        install -m 0644 "$ROOT/client.conf.example" "$CONFIG_HOME/netdisplay/client.conf"
+        install -m 0644 "$ROOT/config/client.conf.example" "$CONFIG_HOME/netdisplay/client.conf"
 fi
 
 if [ "$ENABLE" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then

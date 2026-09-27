@@ -1,5 +1,9 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 project(netdisplay LANGUAGES C)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+    message(FATAL_ERROR "Use an out-of-source build: cmake -S . -B build")
+endif()
 include(CTest)
 
 set(CMAKE_C_STANDARD 11)
@@ -17,7 +21,13 @@ pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 
 add_library(nd_flags INTERFACE)
 target_compile_options(nd_flags INTERFACE
-    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-O3;-Wall;-Wextra;-Wpedantic>)
+    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-Wall;-Wextra;-Wpedantic>)
+
+# Compile shared transport and authentication code once for all consumers.
+add_library(nd_common STATIC
+    src/crypto.c src/frame_transport.c src/network_test.c)
+target_include_directories(nd_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(nd_common PUBLIC nd_flags Threads::Threads PkgConfig::SODIUM)
 
 if(NETDISPLAY_BUILD_SERVER)
     pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
@@ -32,68 +42,46 @@ if(NETDISPLAY_BUILD_SERVER)
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/screencopy.h"
         COMMAND "${WAYLAND_SCANNER}" client-header "${SC_XML}"
                 "${CMAKE_CURRENT_BINARY_DIR}/screencopy.h"
-        DEPENDS "${SC_XML}")
+        DEPENDS "${SC_XML}"
+        VERBATIM)
     add_custom_command(
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/output-power.h"
         COMMAND "${WAYLAND_SCANNER}" client-header "${OP_XML}"
                 "${CMAKE_CURRENT_BINARY_DIR}/output-power.h"
-        DEPENDS "${OP_XML}")
+        DEPENDS "${OP_XML}"
+        VERBATIM)
     add_custom_command(
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/output-power.c"
         COMMAND "${WAYLAND_SCANNER}" private-code "${OP_XML}"
                 "${CMAKE_CURRENT_BINARY_DIR}/output-power.c"
-        DEPENDS "${OP_XML}")
+        DEPENDS "${OP_XML}"
+        VERBATIM)
     add_custom_command(
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/screencopy.c"
         COMMAND "${WAYLAND_SCANNER}" private-code "${SC_XML}"
                 "${CMAKE_CURRENT_BINARY_DIR}/screencopy.c"
-        DEPENDS "${SC_XML}")
+        DEPENDS "${SC_XML}"
+        VERBATIM)
 
     add_executable(netdisplay-server
-        server.c display_state.c video_sender.c crypto.c frame_transport.c network_test.c
+        src/server.c src/display_state.c src/video_sender.c
         "${CMAKE_CURRENT_BINARY_DIR}/screencopy.c"
         "${CMAKE_CURRENT_BINARY_DIR}/screencopy.h"
         "${CMAKE_CURRENT_BINARY_DIR}/output-power.c"
         "${CMAKE_CURRENT_BINARY_DIR}/output-power.h")
     target_include_directories(netdisplay-server PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+        "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(netdisplay-server PRIVATE
-        nd_flags Threads::Threads PkgConfig::WAYLAND PkgConfig::SERVER_FFMPEG
-        PkgConfig::SODIUM)
-endif()
-
-if(BUILD_TESTING)
-    add_executable(netdisplay-transport-test tests/transport_test.c frame_transport.c crypto.c)
-    target_include_directories(netdisplay-transport-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(netdisplay-transport-test PRIVATE nd_flags PkgConfig::SODIUM Threads::Threads)
-    add_test(NAME frame-transport COMMAND netdisplay-transport-test)
-    add_executable(netdisplay-network-test tests/network_test.c network_test.c frame_transport.c crypto.c)
-    target_include_directories(netdisplay-network-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(netdisplay-network-test PRIVATE nd_flags PkgConfig::SODIUM Threads::Threads)
-    add_test(NAME bidirectional-network-probe COMMAND netdisplay-network-test)
-    set_tests_properties(bidirectional-network-probe PROPERTIES TIMEOUT 30)
-    add_executable(netdisplay-crypto-test tests/crypto_test.c crypto.c)
-    target_include_directories(netdisplay-crypto-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(netdisplay-crypto-test PRIVATE nd_flags PkgConfig::SODIUM)
-    add_test(NAME crypto-roundtrip COMMAND netdisplay-crypto-test)
-    if(NETDISPLAY_BUILD_SERVER)
-        add_executable(netdisplay-control-test tests/control_test.c crypto.c network_test.c frame_transport.c)
-        target_include_directories(netdisplay-control-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-        target_link_libraries(netdisplay-control-test PRIVATE nd_flags PkgConfig::SODIUM Threads::Threads)
-        add_test(NAME concurrent-control-sessions
-                 COMMAND netdisplay-control-test $<TARGET_FILE:netdisplay-server>)
-        set_tests_properties(concurrent-control-sessions PROPERTIES TIMEOUT 20)
-    endif()
+        nd_common PkgConfig::WAYLAND PkgConfig::SERVER_FFMPEG)
 endif()
 
 if(NETDISPLAY_BUILD_CLIENT)
     # VA stays dynamic so the client uses the receiver laptop's installed
     # libva + vendor VA driver.
     pkg_check_modules(LIBVA REQUIRED IMPORTED_TARGET libva libva-drm)
-    add_executable(netdisplay-client client.c video_receiver.c crypto.c frame_transport.c network_test.c)
-    target_include_directories(netdisplay-client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_executable(netdisplay-client src/client.c src/video_receiver.c)
     target_link_libraries(netdisplay-client PRIVATE
-        nd_flags Threads::Threads ${CMAKE_DL_LIBS} PkgConfig::SODIUM)
+        nd_common ${CMAKE_DL_LIBS})
 
     if(NETDISPLAY_STATIC_CLIENT_PREFIX)
         find_path(ND_AV_INCLUDE libavcodec/avcodec.h
@@ -123,4 +111,8 @@ if(NETDISPLAY_BUILD_CLIENT)
         pkg_check_modules(CLIENT REQUIRED IMPORTED_TARGET libdrm libavcodec libavutil)
         target_link_libraries(netdisplay-client PRIVATE PkgConfig::CLIENT PkgConfig::LIBVA)
     endif()
+endif()
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
 endif()

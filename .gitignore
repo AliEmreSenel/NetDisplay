@@ -1,5 +1,8 @@
 # Local build and packaging output
 /build/
+/build-*/
+/.cache/
+/_deps/
 /dist/
 /CMakeFiles/
 /CMakeCache.txt
@@ -15,5 +18,7 @@
 /receiver_v3
 /screencopy.c
 /screencopy.h
+/output-power.c
+/output-power.h
 *.o
 
