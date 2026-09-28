@@ -316,6 +316,37 @@ If the server uses `password_key`, the interactive prompt needs no client settin
 For unattended authentication, `psk_file` must point to the same key material
 configured on the server.
 
+## Receiver keyboard, exit shortcut, and hotplug
+
+The receiver reads raw evdev events and grabs input devices by default.
+Ctrl+C is forwarded to the source when input is enabled; it does not terminate
+the receiver. Press and release **Escape five times consecutively** to exit the
+receiver completely, stop every video worker, release DRM and input devices,
+and restore the terminal. Another keyboard key press resets the sequence;
+mouse motion and buttons do not. Holding Escape does not count as five presses.
+The first four Escape presses still reach the source normally.
+
+The local exit shortcut remains active while reconnecting and when remote
+input forwarding is disabled. Keyboards, mice, and touchpads can be plugged
+in or removed while running, including starting without an input device.
+New devices and permission changes are detected within about one second.
+Unplugging a keyboard or mouse releases its held keys/buttons at the source;
+other devices continue working. Multiple keyboards holding the same key do
+not release each other's key state.
+
+`grab_input=0` allows simultaneous local delivery, but terminal signal
+processing is still disabled. Password entry temporarily releases grabs and
+restores normal terminal input. The receiver needs read access to the relevant
+`/dev/input/event*` nodes. If no readable evdev keyboard exists, an attached
+terminal accepts five consecutive literal Escape bytes as a fallback; terminal
+input cannot distinguish held-key repeat. External SIGTERM/SIGHUP requests a
+clean shutdown. SIGINT is ignored.
+
+The bundled client user service uses `Restart=on-failure`, so an intentional
+exit stays stopped. Reinstall the service to update an already installed unit.
+Input-state and terminal tests run with CTest; `./tests/run-input-vm.sh` also
+checks real evdev/uinput hotplug and local shutdown in a disposable QEMU VM.
+
 ## Passwords, PSKs, and frame encryption
 
 Set `password_key=` in the server config to require interactive authentication.

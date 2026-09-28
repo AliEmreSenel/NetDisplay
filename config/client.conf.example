@@ -34,7 +34,10 @@ backlight_device=auto
 
 # Input is sent only when BOTH this request and server input_enabled=1 are true.
 want_input=1
-grab_input=0
+# Grab raw evdev input exclusively by default. Ctrl+C is forwarded to the
+# source; five consecutive Escape presses shut down the receiver locally.
+# Set 0 to allow simultaneous local delivery (terminal signals stay disabled).
+grab_input=1
 reconnect_ms=500
 
 # Send batteries, chargers, and their available read-only attributes to the source.

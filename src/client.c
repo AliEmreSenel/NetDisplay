@@ -6,6 +6,7 @@
 #include "proto.h"
 #include "network_test.h"
 #include "power_state.h"
+#include "input_receiver.h"
 #include "video_receiver.h"
 #include <dirent.h>
 #include <dlfcn.h>
@@ -23,12 +24,13 @@
 
 extern char **environ;
 static const char *self_program;
-
-#define BITS_PER_LONG (sizeof(unsigned long) * 8u)
-#define NBITS(x) (((x) + BITS_PER_LONG - 1u) / BITS_PER_LONG)
-#define TEST_BIT(a, b)                                                         \
-  (((a)[(b) / BITS_PER_LONG] >> ((b) % BITS_PER_LONG)) & 1ul)
-#define MAX_INPUT_DEVS 32
+static struct nd_input_context input;
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "shutdown flag must be signal-safe");
+static void request_shutdown(int signal_number) {
+  (void)signal_number;
+  atomic_store(&input.quit, 1);
+}
+static void stop_local_input(void) { nd_input_stop(&input); }
 
 struct client_cfg {
   char host[64];
@@ -51,29 +53,13 @@ struct client_cfg {
   } display[NDC_MAX_DISPLAYS];
   int display_count;
 };
-struct input_dev {
-  int fd;
-  uint8_t cls;
-  char path[256];
-  struct input_absinfo abs_x, abs_y, mt_x, mt_y, pressure, mt_pressure;
-  int have_abs_x, have_abs_y, have_mt_x, have_mt_y, have_pressure,
-      have_mt_pressure;
-};
-
-struct input_ctx {
-  int sock;
-  int grab;
-  pthread_mutex_t send_mutex;
-  _Atomic int running;
-};
-
 static void cfg_defaults(struct client_cfg *c) {
   memset(c, 0, sizeof(*c));
   snprintf(c->host, sizeof(c->host), "auto");
   c->port = NDC_DEFAULT_PORT;
   c->want_input = 1;
   c->send_power = 1;
-  c->grab_input = 0;
+  c->grab_input = 1;
   c->reconnect_ms = 500;
   snprintf(c->backlight_device, sizeof(c->backlight_device), "auto");
   /* Empty means auto-detect. This is important for the portable receiver: the
@@ -385,7 +371,7 @@ static int discover_host(const struct client_cfg *cfg, char *ip, size_t ipsz,
 }
 
 static int connect_host_ip(const char *ip, int port, const char *ifname) {
-  int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
   if (s < 0)
     return -1;
   if (ifname && *ifname &&
@@ -405,238 +391,47 @@ static int connect_host_ip(const char *ip, int port, const char *ifname) {
     return -1;
   }
   if (connect(s, (struct sockaddr *)&a, sizeof(a)) < 0) {
-    int e = errno;
+    if (errno != EINPROGRESS) {
+      int error = errno;
+      close(s);
+      errno = error;
+      return -1;
+    }
+    struct pollfd pending = {.fd = s, .events = POLLOUT};
+    int connected = 0, failure = ETIMEDOUT;
+    for (int attempt = 0; attempt < 20 && !atomic_load(&input.quit); attempt++) {
+      int ready = poll(&pending, 1, 250);
+      if (ready < 0 && errno == EINTR)
+        continue;
+      if (ready < 0) {
+        failure = errno;
+        break;
+      }
+      if (!ready)
+        continue;
+      int error = 0;
+      socklen_t size = sizeof(error);
+      if (getsockopt(s, SOL_SOCKET, SO_ERROR, &error, &size) == 0 && !error)
+        connected = 1;
+      else
+        failure = error ? error : errno;
+      break;
+    }
+    if (!connected) {
+      close(s);
+      errno = atomic_load(&input.quit) ? ECANCELED : failure;
+      return -1;
+    }
+  }
+  int flags = fcntl(s, F_GETFL);
+  if (atomic_load(&input.quit) || flags < 0 ||
+      fcntl(s, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+    int error = atomic_load(&input.quit) ? ECANCELED : errno;
     close(s);
-    errno = e;
+    errno = error;
     return -1;
   }
   return s;
-}
-
-static int get_bits(int fd, int ev, unsigned long *bits, size_t nbytes) {
-  memset(bits, 0, nbytes);
-  return ioctl(fd, EVIOCGBIT(ev, nbytes), bits);
-}
-
-static uint8_t classify_input(int fd) {
-  unsigned long evbits[NBITS(EV_MAX + 1)];
-  if (get_bits(fd, 0, evbits, sizeof(evbits)) < 0)
-    return 0;
-
-  if (TEST_BIT(evbits, EV_ABS)) {
-    unsigned long absbits[NBITS(ABS_MAX + 1)];
-    if (get_bits(fd, EV_ABS, absbits, sizeof(absbits)) >= 0 &&
-        TEST_BIT(absbits, ABS_MT_POSITION_X) &&
-        TEST_BIT(absbits, ABS_MT_POSITION_Y))
-      return NDC_DEV_TOUCHPAD;
-  }
-
-  if (TEST_BIT(evbits, EV_REL)) {
-    unsigned long relbits[NBITS(REL_MAX + 1)];
-    if (get_bits(fd, EV_REL, relbits, sizeof(relbits)) >= 0 &&
-        TEST_BIT(relbits, REL_X) && TEST_BIT(relbits, REL_Y))
-      return NDC_DEV_KBM;
-  }
-
-  if (TEST_BIT(evbits, EV_KEY)) {
-    unsigned long keybits[NBITS(KEY_MAX + 1)];
-    if (get_bits(fd, EV_KEY, keybits, sizeof(keybits)) >= 0 &&
-        TEST_BIT(keybits, KEY_A) && TEST_BIT(keybits, KEY_SPACE) &&
-        TEST_BIT(keybits, KEY_ENTER))
-      return NDC_DEV_KBM;
-  }
-  return 0;
-}
-
-static void read_abs(int fd, int code, struct input_absinfo *a, int *have) {
-  if (ioctl(fd, EVIOCGABS(code), a) == 0 && a->maximum > a->minimum)
-    *have = 1;
-}
-
-static int scan_inputs(struct input_dev *devs, int grab) {
-  glob_t g;
-  memset(&g, 0, sizeof(g));
-  if (glob("/dev/input/event*", 0, NULL, &g) != 0)
-    return 0;
-  int ndev = 0;
-  for (size_t i = 0; i < g.gl_pathc && ndev < MAX_INPUT_DEVS; i++) {
-    int fd = open(g.gl_pathv[i], O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0)
-      continue;
-    uint8_t cls = classify_input(fd);
-    if (!cls) {
-      close(fd);
-      continue;
-    }
-
-    struct input_dev *d = &devs[ndev];
-    memset(d, 0, sizeof(*d));
-    d->fd = fd;
-    d->cls = cls;
-    snprintf(d->path, sizeof(d->path), "%s", g.gl_pathv[i]);
-    if (cls == NDC_DEV_TOUCHPAD) {
-      read_abs(fd, ABS_X, &d->abs_x, &d->have_abs_x);
-      read_abs(fd, ABS_Y, &d->abs_y, &d->have_abs_y);
-      read_abs(fd, ABS_MT_POSITION_X, &d->mt_x, &d->have_mt_x);
-      read_abs(fd, ABS_MT_POSITION_Y, &d->mt_y, &d->have_mt_y);
-      read_abs(fd, ABS_PRESSURE, &d->pressure, &d->have_pressure);
-      read_abs(fd, ABS_MT_PRESSURE, &d->mt_pressure, &d->have_mt_pressure);
-    }
-    if (grab && ioctl(fd, EVIOCGRAB, 1) < 0)
-      fprintf(stderr, "warning: cannot grab %s: %s\n", d->path,
-              strerror(errno));
-    char name[128] = "?";
-    (void)ioctl(fd, EVIOCGNAME(sizeof(name)), name);
-    fprintf(stderr, "input %s: %s (%s)\n",
-            cls == NDC_DEV_TOUCHPAD ? "touchpad" : "kbd/mouse", name, d->path);
-    ndev++;
-  }
-  globfree(&g);
-  return ndev;
-}
-
-static void close_inputs(struct input_dev *devs, int ndev, int grab) {
-  for (int i = 0; i < ndev; i++) {
-    if (devs[i].fd >= 0) {
-      if (grab)
-        (void)ioctl(devs[i].fd, EVIOCGRAB, 0);
-      close(devs[i].fd);
-    }
-  }
-}
-
-static int scale_abs(int v, const struct input_absinfo *a, int outmax) {
-  if (!a || a->maximum <= a->minimum)
-    return v;
-  if (v <= a->minimum)
-    return 0;
-  if (v >= a->maximum)
-    return outmax;
-  int64_t num = (int64_t)(v - a->minimum) * outmax;
-  return (int)(num / (a->maximum - a->minimum));
-}
-
-static int touchpad_abs_value(struct input_dev *d, uint16_t code, int v,
-                              int *supported) {
-  *supported = 1;
-  switch (code) {
-  case ABS_X:
-    return d->have_abs_x ? scale_abs(v, &d->abs_x, 10000) : v;
-  case ABS_Y:
-    return d->have_abs_y ? scale_abs(v, &d->abs_y, 7000) : v;
-  case ABS_MT_POSITION_X:
-    return d->have_mt_x ? scale_abs(v, &d->mt_x, 10000) : v;
-  case ABS_MT_POSITION_Y:
-    return d->have_mt_y ? scale_abs(v, &d->mt_y, 7000) : v;
-  case ABS_PRESSURE:
-    return d->have_pressure ? scale_abs(v, &d->pressure, 255) : v;
-  case ABS_MT_PRESSURE:
-    return d->have_mt_pressure ? scale_abs(v, &d->mt_pressure, 255) : v;
-  case ABS_MT_SLOT:
-  case ABS_MT_TRACKING_ID:
-  case ABS_MT_TOUCH_MAJOR:
-  case ABS_MT_TOUCH_MINOR:
-  case ABS_MT_WIDTH_MAJOR:
-  case ABS_MT_WIDTH_MINOR:
-  case ABS_MT_ORIENTATION:
-#ifdef ABS_MT_TOOL_TYPE
-  case ABS_MT_TOOL_TYPE:
-#endif
-#ifdef ABS_MT_DISTANCE
-  case ABS_MT_DISTANCE:
-#endif
-    return v;
-  default:
-    *supported = 0;
-    return v;
-  }
-}
-
-static int send_input(struct input_ctx *ctx, uint8_t dev,
-                      const struct input_event *ev, int value) {
-  struct ndc_input w = {
-      .device = dev,
-      .reserved0 = 0,
-      .type = htons(ev->type),
-      .code = htons(ev->code),
-      .reserved1 = 0,
-      .value = (int32_t)htonl((uint32_t)value),
-  };
-  pthread_mutex_lock(&ctx->send_mutex);
-  int r = ndc_send_msg(ctx->sock, NDC_INPUT, &w, sizeof(w));
-  pthread_mutex_unlock(&ctx->send_mutex);
-  return r;
-}
-
-static void *input_main(void *opaque) {
-  struct input_ctx *ctx = opaque;
-  struct input_dev devs[MAX_INPUT_DEVS];
-  int ndev = scan_inputs(devs, ctx->grab);
-  if (!ndev) {
-    fprintf(stderr, "no readable keyboard/mouse/touchpad evdev devices\n");
-    atomic_store(&ctx->running, 0);
-    return NULL;
-  }
-
-  struct pollfd pfds[MAX_INPUT_DEVS];
-  for (int i = 0; i < ndev; i++) {
-    pfds[i].fd = devs[i].fd;
-    pfds[i].events = POLLIN;
-  }
-
-  while (atomic_load(&ctx->running)) {
-    int pr = poll(pfds, ndev, 250);
-    if (pr < 0) {
-      if (errno == EINTR)
-        continue;
-      break;
-    }
-    if (pr == 0)
-      continue;
-    for (int i = 0; i < ndev; i++) {
-      if (!(pfds[i].revents & POLLIN))
-        continue;
-      for (;;) {
-        struct input_event ev;
-        ssize_t n = read(devs[i].fd, &ev, sizeof(ev));
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-          break;
-        if (n < 0 && errno == EINTR)
-          continue;
-        if (n != (ssize_t)sizeof(ev))
-          goto done;
-
-        if (ev.type != EV_SYN && ev.type != EV_KEY && ev.type != EV_REL &&
-            ev.type != EV_ABS)
-          continue;
-        if (devs[i].cls == NDC_DEV_KBM) {
-          if (ev.type == EV_ABS)
-            continue;
-          if (ev.type == EV_KEY && ev.value == 2)
-            continue; /* host handles repeat */
-          if (send_input(ctx, NDC_DEV_KBM, &ev, ev.value) < 0)
-            goto done;
-        } else {
-          if (ev.type == EV_REL)
-            continue;
-          int value = ev.value;
-          if (ev.type == EV_ABS) {
-            int supported;
-            value = touchpad_abs_value(&devs[i], ev.code, ev.value, &supported);
-            if (!supported)
-              continue;
-          }
-          if (send_input(ctx, NDC_DEV_TOUCHPAD, &ev, value) < 0)
-            goto done;
-        }
-      }
-    }
-  }
-done:
-  close_inputs(devs, ndev, ctx->grab);
-  atomic_store(&ctx->running, 0);
-  shutdown(ctx->sock, SHUT_RDWR);
-  return NULL;
 }
 
 static int find_client_backlight(const char *setting, char *dir, size_t dirsz) {
@@ -957,8 +752,12 @@ static int wait_receiver_ready(pid_t pid, int fd, int timeout_ms) {
   struct pollfd p = {.fd = fd, .events = POLLIN | POLLHUP};
   int pr;
   do {
+    if (atomic_load(&input.quit)) {
+      errno = ECANCELED;
+      return -1;
+    }
     pr = poll(&p, 1, timeout_ms);
-  } while (pr < 0 && errno == EINTR);
+  } while (pr < 0 && errno == EINTR && !atomic_load(&input.quit));
   if (pr <= 0) {
     if (pr == 0)
       errno = ETIMEDOUT;
@@ -1030,6 +829,16 @@ int main(int argc, char **argv) {
                 : default_config_path(default_cfg, sizeof(default_cfg));
   struct client_cfg cfg;
   load_cfg(cfg_path, &cfg, argc == 2);
+  signal(SIGINT, SIG_IGN);
+  signal(SIGQUIT, SIG_IGN);
+  struct sigaction stop_action = {.sa_handler = request_shutdown};
+  sigemptyset(&stop_action.sa_mask);
+  sigaction(SIGUSR1, &stop_action, NULL);
+  sigaction(SIGTERM, &stop_action, NULL);
+  sigaction(SIGHUP, &stop_action, NULL);
+  if (nd_input_start(&input, cfg.grab_input) < 0)
+    die("start local input");
+  atexit(stop_local_input);
 
   struct nd_local_display found[NDC_MAX_DISPLAYS], displays[NDC_MAX_DISPLAYS];
   int master_fd = -1;
@@ -1076,7 +885,7 @@ int main(int argc, char **argv) {
             displays[i].width, displays[i].height, displays[i].refresh_hz,
             displays[i].crtc_id);
 
-  for (;;) {
+  while (!atomic_load(&input.quit)) {
     char host_ip[sizeof(cfg.host)], discovered_if[IFNAMSIZ] = "";
     int control_port = cfg.port;
     if (!strcmp(cfg.host, "auto")) {
@@ -1091,6 +900,9 @@ int main(int argc, char **argv) {
     int s = connect_host_ip(host_ip, control_port, discovered_if);
     if (s < 0)
       goto retry;
+    struct timeval send_timeout = {.tv_sec = 2};
+    (void)setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+    nd_input_session(&input, s, 0);
 
     struct client_stream_runtime streams[NDC_MAX_DISPLAYS];
     memset(streams, 0, sizeof(streams));
@@ -1129,7 +941,10 @@ int main(int argc, char **argv) {
       errno = EINVAL;
       session_ok = 0;
     } else if (session_ok && server_uses_password && !cfg.have_psk) {
-      if (prompt_password(cfg.psk) < 0) {
+      nd_input_prompt(&input, 1);
+      int password_result = atomic_load(&input.quit) ? -1 : prompt_password(cfg.psk);
+      nd_input_prompt(&input, 0);
+      if (password_result < 0) {
         fprintf(stderr, "password entry failed\n");
         session_ok = 0;
       } else {
@@ -1225,6 +1040,10 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; session_ok && i < display_count; i++) {
       struct client_stream_runtime *st = &streams[i];
+      if (atomic_load(&input.quit)) {
+        session_ok = 0;
+        break;
+      }
       uint8_t key[ND_KEY_SIZE] = {0};
       if (cfg.frame_encryption)
         nd_crypto_stream_key(key, cfg.psk, st->stream_id, hello.nonce,
@@ -1247,30 +1066,22 @@ int main(int argc, char **argv) {
         session_ok = 0;
     }
 
-    struct input_ctx ictx = {.sock = s,
-                             .grab = cfg.grab_input,
-                             .send_mutex = PTHREAD_MUTEX_INITIALIZER};
-    atomic_init(&ictx.running, session_ok && input_allowed && cfg.want_input);
-    pthread_t input_thread;
-    int have_input_thread = 0;
-    if (atomic_load(&ictx.running) &&
-        pthread_create(&input_thread, NULL, input_main, &ictx) == 0)
-      have_input_thread = 1;
+    nd_input_session(&input, s, session_ok && input_allowed && cfg.want_input);
 
     struct nd_power_snapshot *power = NULL;
     if (session_ok && cfg.send_power && (ntohl(welcome.flags) & NDC_FLAG_POWER_INFO))
       power = calloc(1, sizeof(*power));
     uint64_t next_power_ms = 0;
     int power_read_warned = 0;
-    while (session_ok) {
+    while (session_ok && !atomic_load(&input.quit)) {
       uint64_t now_ms = nd_power_now_ms();
       if (power && now_ms >= next_power_ms) {
         next_power_ms = now_ms + ND_POWER_INTERVAL_MS;
         if (nd_power_read("/sys/class/power_supply", power) == 0) {
           power_read_warned = 0;
-          pthread_mutex_lock(&ictx.send_mutex);
+          pthread_mutex_lock(&input.send_mutex);
           int sent = nd_power_send(s, power);
-          pthread_mutex_unlock(&ictx.send_mutex);
+          pthread_mutex_unlock(&input.send_mutex);
           if (sent < 0) break;
         } else if (!power_read_warned) {
           fprintf(stderr, "cannot read power supplies: %s\n", strerror(errno));
@@ -1296,9 +1107,9 @@ int main(int argc, char **argv) {
       if (pr < 0 || (pr > 0 && !(p.revents & POLLIN)))
         break;
       if (!pr) {
-        pthread_mutex_lock(&ictx.send_mutex);
+        pthread_mutex_lock(&input.send_mutex);
         int sr = ndc_send_msg(s, NDC_PING, NULL, 0);
-        pthread_mutex_unlock(&ictx.send_mutex);
+        pthread_mutex_unlock(&input.send_mutex);
         if (sr < 0)
           break;
         continue;
@@ -1309,9 +1120,9 @@ int main(int argc, char **argv) {
       if (ndc_recv_msg(s, &type, b, &len) <= 0)
         break;
       if (type == NDC_PING && len == 0) {
-        pthread_mutex_lock(&ictx.send_mutex);
+        pthread_mutex_lock(&input.send_mutex);
         int sr = ndc_send_msg(s, NDC_PONG, NULL, 0);
-        pthread_mutex_unlock(&ictx.send_mutex);
+        pthread_mutex_unlock(&input.send_mutex);
         if (sr < 0)
           break;
       } else if (type == NDC_PONG && len == 0) {
@@ -1340,18 +1151,23 @@ int main(int argc, char **argv) {
         break;
     }
     free(power);
-    atomic_store(&ictx.running, 0);
+    nd_input_session(&input, -1, 0);
     shutdown(s, SHUT_RDWR);
-    if (have_input_thread)
-      pthread_join(input_thread, NULL);
     close(s);
     for (int i = 0; i < display_count; i++) {
       if (streams[i].state_fd >= 0)
         close(streams[i].state_fd);
       ndc_stop_child(&streams[i].pid);
     }
-    fprintf(stderr, "source disconnected; reconnecting\n");
+    if (!atomic_load(&input.quit))
+      fprintf(stderr, "source disconnected; reconnecting\n");
   retry:
+    if (atomic_load(&input.quit)) break;
     usleep((useconds_t)cfg.reconnect_ms * 1000u);
   }
+  nd_input_stop(&input);
+  close(master_fd);
+  explicit_bzero(cfg.psk, sizeof(cfg.psk));
+  fprintf(stderr, "receiver shut down\n");
+  return 0;
 }
