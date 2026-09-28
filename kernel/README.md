@@ -7,7 +7,7 @@ The server runs as its normal user; only module installation needs root.
 From a NetDisplay checkout, install the server and opt into DKMS setup:
 
 ```sh
-./install.sh --server --with-power-module
+./install.sh server --with-power-module
 ```
 
 Install `dkms`, a C compiler, make, and the development headers matching the

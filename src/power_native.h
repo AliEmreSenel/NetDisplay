@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #ifndef NETDISPLAY_POWER_NATIVE_H
 #define NETDISPLAY_POWER_NATIVE_H
 #include "power_state.h"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #ifndef ND_FRAME_TRANSPORT_H
 #define ND_FRAME_TRANSPORT_H
 #include "proto.h"

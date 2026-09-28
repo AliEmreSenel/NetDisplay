@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #define _GNU_SOURCE
 #include "../../src/common.h"
 #include "../../src/power_native.h"

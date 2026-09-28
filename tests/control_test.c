@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <sodium/core.h>
 #define _GNU_SOURCE
 #include "common.h"

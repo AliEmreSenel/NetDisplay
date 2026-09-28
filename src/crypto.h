@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #ifndef NETDISPLAY_CRYPTO_H
 #define NETDISPLAY_CRYPTO_H
 

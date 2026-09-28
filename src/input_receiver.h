@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #ifndef NETDISPLAY_INPUT_RECEIVER_H
 #define NETDISPLAY_INPUT_RECEIVER_H
 #include <linux/input.h>

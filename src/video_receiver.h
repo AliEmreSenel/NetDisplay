@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #ifndef NETDISPLAY_VIDEO_RECEIVER_H
 #define NETDISPLAY_VIDEO_RECEIVER_H
 #include <stddef.h>

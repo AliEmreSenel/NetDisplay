@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #ifndef NETDISPLAY_DISPLAY_STATE_H
 #define NETDISPLAY_DISPLAY_STATE_H
 

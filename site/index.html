@@ -69,7 +69,7 @@ check_build_deps() {
     done
     if [ "$MODE" = server ]; then
         command -v wayland-scanner >/dev/null 2>&1 || MISSING="$MISSING wayland-scanner"
-        PCS="wayland-client libavcodec libavutil wlr-protocols libsodium"
+        PCS="wayland-client libavcodec libavutil libsodium"
     else
         PCS="libdrm libavcodec libavutil libva libva-drm libsodium"
     fi
@@ -104,7 +104,7 @@ install_build_deps() {
         run_as_root apt-get update
         if [ "$MODE" = server ]; then
             run_as_root apt-get install -y build-essential cmake pkg-config tar \
-                libwayland-dev libwayland-bin wlr-protocols libavcodec-dev \
+                libwayland-dev libwayland-bin libavcodec-dev \
                 libavutil-dev libsodium-dev
         else
             run_as_root apt-get install -y build-essential cmake pkg-config tar \
@@ -113,7 +113,7 @@ install_build_deps() {
     elif command -v dnf >/dev/null 2>&1; then
         if [ "$MODE" = server ]; then
             run_as_root dnf install -y gcc cmake pkgconf-pkg-config tar \
-                wayland-devel wlr-protocols-devel ffmpeg-free-devel libsodium-devel
+                wayland-devel ffmpeg-free-devel libsodium-devel
         else
             run_as_root dnf install -y gcc cmake pkgconf-pkg-config tar \
                 libdrm-devel ffmpeg-free-devel libva-devel libsodium-devel
@@ -121,7 +121,7 @@ install_build_deps() {
     elif command -v yum >/dev/null 2>&1; then
         if [ "$MODE" = server ]; then
             run_as_root yum install -y gcc cmake pkgconfig tar wayland-devel \
-                wlr-protocols-devel ffmpeg-free-devel libsodium-devel
+                ffmpeg-free-devel libsodium-devel
         else
             run_as_root yum install -y gcc cmake pkgconfig tar libdrm-devel \
                 ffmpeg-free-devel libva-devel libsodium-devel
@@ -129,7 +129,7 @@ install_build_deps() {
     elif command -v zypper >/dev/null 2>&1; then
         if [ "$MODE" = server ]; then
             run_as_root zypper --non-interactive install gcc cmake pkg-config tar \
-                wayland-devel wlr-protocols-devel libavcodec-devel \
+                wayland-devel libavcodec-devel \
                 libavutil-devel libsodium-devel
         else
             run_as_root zypper --non-interactive install gcc cmake pkg-config tar \
@@ -138,7 +138,7 @@ install_build_deps() {
     elif command -v pacman >/dev/null 2>&1; then
         if [ "$MODE" = server ]; then
             run_as_root pacman -S --needed --noconfirm base-devel cmake pkgconf tar \
-                wayland wlr-protocols ffmpeg libsodium
+                wayland ffmpeg libsodium
         else
             run_as_root pacman -S --needed --noconfirm base-devel cmake pkgconf tar \
                 libdrm ffmpeg libva libsodium
@@ -146,7 +146,7 @@ install_build_deps() {
     elif command -v apk >/dev/null 2>&1; then
         if [ "$MODE" = server ]; then
             run_as_root apk add build-base cmake pkgconf tar wayland-dev \
-                wlr-protocols ffmpeg-dev libsodium-dev
+                ffmpeg-dev libsodium-dev
         else
             run_as_root apk add build-base cmake pkgconf tar libdrm-dev ffmpeg-dev \
                 libva-dev libsodium-dev
@@ -154,7 +154,7 @@ install_build_deps() {
     elif command -v xbps-install >/dev/null 2>&1; then
         if [ "$MODE" = server ]; then
             run_as_root xbps-install -Sy base-devel cmake pkg-config tar \
-                wayland-devel wlr-protocols ffmpeg-devel libsodium-devel
+                wayland-devel ffmpeg-devel libsodium-devel
         else
             run_as_root xbps-install -Sy base-devel cmake pkg-config tar \
                 libdrm-devel ffmpeg-devel libva-devel libsodium-devel

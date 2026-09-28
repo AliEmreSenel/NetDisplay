@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #ifndef NETDISPLAY_VIDEO_SENDER_H
 #define NETDISPLAY_VIDEO_SENDER_H
 int nd_video_sender_run(const char *output_name, const char *receiver_ip,

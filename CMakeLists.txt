@@ -32,11 +32,9 @@ target_link_libraries(nd_common PUBLIC nd_flags Threads::Threads PkgConfig::SODI
 if(NETDISPLAY_BUILD_SERVER)
     pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
     pkg_check_modules(SERVER_FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil)
-    pkg_check_modules(WLR REQUIRED wlr-protocols)
     find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
-    pkg_get_variable(WLR_DATADIR wlr-protocols pkgdatadir)
-    set(SC_XML "${WLR_DATADIR}/unstable/wlr-screencopy-unstable-v1.xml")
-    set(OP_XML "${WLR_DATADIR}/unstable/wlr-output-power-management-unstable-v1.xml")
+    set(SC_XML "${CMAKE_CURRENT_SOURCE_DIR}/protocols/wlr-screencopy-unstable-v1.xml")
+    set(OP_XML "${CMAKE_CURRENT_SOURCE_DIR}/protocols/wlr-output-power-management-unstable-v1.xml")
 
     add_custom_command(
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/screencopy.h"

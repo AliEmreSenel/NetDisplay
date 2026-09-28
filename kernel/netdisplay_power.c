@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /* Read-only remote power supplies. No hardware access or power-management actions. */
 #include "netdisplay_power.h"
 #include <linux/fs.h>
@@ -314,7 +314,7 @@ static ssize_t nd_write(struct file *file, const char __user *buf, size_t size, 
 {
 	struct nd_supply *s = file->private_data;
 	struct nd_power_native *d;
-	struct power_supply_config config = {.drv_data = s, .no_wakeup_source = true};
+	struct power_supply_config config = {.drv_data = s};
 	unsigned int i;
 	int ret;
 	if (size != sizeof(*d))

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #ifndef ND_NETWORK_TEST_H
 #define ND_NETWORK_TEST_H
 #include <stdint.h>
