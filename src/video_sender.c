@@ -360,12 +360,17 @@ find_encoder_candidate(const char *name) {
 }
 
 static const enum AVPixelFormat *codec_pix_fmts(const AVCodec *codec) {
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 13, 100)
   const void *list = NULL;
   if (!codec ||
       avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0,
                                    &list, NULL) < 0)
     return NULL;
   return (const enum AVPixelFormat *)list;
+#else
+  /* FFmpeg before 7.1 exposes the same terminated list on AVCodec. */
+  return codec ? codec->pix_fmts : NULL;
+#endif
 }
 
 static int codec_accepts_pix_fmt(const AVCodec *codec, enum AVPixelFormat fmt);
