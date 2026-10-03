@@ -519,6 +519,10 @@
 					"$(SRCROOT)/Native",
 					"$(SRCROOT)/build/sodium/iphoneos-arm64/include",
 				);
+				"LIBRARY_SEARCH_PATHS" = (
+					"$(inherited)",
+					"$(SRCROOT)/build/sodium/iphoneos-arm64/lib",
+				);
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -581,6 +585,10 @@
 					"$(SRCROOT)/../src",
 					"$(SRCROOT)/Native",
 					"$(SRCROOT)/build/sodium/iphoneos-arm64/include",
+				);
+				"LIBRARY_SEARCH_PATHS" = (
+					"$(inherited)",
+					"$(SRCROOT)/build/sodium/iphoneos-arm64/lib",
 				);
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",

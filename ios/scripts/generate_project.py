@@ -72,6 +72,7 @@ for config in ['Debug','Release']:
         'SUPPORTS_MACCATALYST':'NO','SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD':'NO',
         'ARCHS':'arm64','SWIFT_OBJC_BRIDGING_HEADER':'Native/NetDisplay-Bridging-Header.h',
         'HEADER_SEARCH_PATHS':['$(inherited)','$(SRCROOT)/../src','$(SRCROOT)/Native','$(SRCROOT)/build/sodium/iphoneos-arm64/include'],
+        'LIBRARY_SEARCH_PATHS':['$(inherited)','$(SRCROOT)/build/sodium/iphoneos-arm64/lib'],
         'LD_RUNPATH_SEARCH_PATHS':['$(inherited)','@executable_path/Frameworks'],
         'ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES':'YES',
         'SWIFT_EMIT_LOC_STRINGS':'NO','ENABLE_BITCODE':'NO',
