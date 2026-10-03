@@ -11,7 +11,19 @@ enum ViewerMode: String, CaseIterable, Identifiable, Codable {
     var id: String { rawValue }
     var shaderValue: Float { switch self { case .flat: return 0; case .stereo: return 1; case .duplicate: return 2 } }
 }
+enum ViewerPurpose: String, CaseIterable, Identifiable, Codable {
+    case touch = "Touch Display", vr = "VR / SteamVR"
+    var id: String { rawValue }
+}
 struct AppSettings: Codable, Equatable {
+    // Optional storage preserves decoding of settings saved before this choice existed.
+    var savedViewerPurpose: ViewerPurpose? = nil
+    var viewerPurpose: ViewerPurpose {
+        get { savedViewerPurpose ?? .touch }
+        set { savedViewerPurpose = newValue }
+    }
+    var renderMode: ViewerMode { viewerPurpose == .touch ? .flat : viewerMode }
+
     var host = ""
     var controlPort = 5001
     var resolution = "1280x720"

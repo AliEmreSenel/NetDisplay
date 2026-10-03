@@ -11,6 +11,7 @@
 #include "video_sender.h"
 #include <dirent.h>
 #include <linux/input.h>
+#include "touch_input.h"
 #include <linux/uinput.h>
 #include <poll.h>
 #include <pthread.h>
@@ -357,6 +358,31 @@ fail:
   return -1;
 }
 
+/* Direct, type-B multitouch. Coordinates use a shared 0..65535 range. */
+static int create_touchscreen_uinput(unsigned serial) {
+  int fd = open("/dev/uinput", O_WRONLY | O_CLOEXEC);
+  if (fd < 0) return -1;
+  if (ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0 ||
+      ioctl(fd, UI_SET_EVBIT, EV_ABS) < 0 ||
+      ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT) < 0 ||
+      ioctl(fd, UI_SET_KEYBIT, BTN_TOUCH) < 0 ||
+      ui_setup_abs(fd, ABS_X, 0, 65535, 0) < 0 ||
+      ui_setup_abs(fd, ABS_Y, 0, 65535, 0) < 0 ||
+      ui_setup_abs(fd, ABS_MT_SLOT, 0, 9, 0) < 0 ||
+      ui_setup_abs(fd, ABS_MT_TRACKING_ID, -1, 65535, 0) < 0 ||
+      ui_setup_abs(fd, ABS_MT_POSITION_X, 0, 65535, 0) < 0 ||
+      ui_setup_abs(fd, ABS_MT_POSITION_Y, 0, 65535, 0) < 0 ||
+      ui_setup_abs(fd, ABS_MT_PRESSURE, 0, 255, 0) < 0 ||
+      ui_setup_abs(fd, ABS_MT_TOUCH_MAJOR, 0, 255, 0) < 0) goto fail;
+  struct uinput_setup us = {0};
+  us.id.bustype = BUS_VIRTUAL; us.id.vendor = 0x4e44; us.id.product = 3;
+  snprintf(us.name, sizeof(us.name), "netdisplay-touch-%u", serial);
+  if (ioctl(fd, UI_DEV_SETUP, &us) < 0 || ioctl(fd, UI_DEV_CREATE) < 0) goto fail;
+  return fd;
+fail:
+  close(fd); return -1;
+}
+
 static void destroy_ui(int *fd) {
   if (*fd >= 0) {
     (void)ioctl(*fd, UI_DEV_DESTROY);
@@ -365,8 +391,10 @@ static void destroy_ui(int *fd) {
   }
 }
 
-static int inject_event(int kbm, int tp, const struct ndc_input *w) {
-  int fd = w->device == NDC_DEV_TOUCHPAD ? tp : kbm;
+static int inject_event(int kbm, int tp, int touch, const struct ndc_input *w) {
+  int fd = w->device == NDC_DEV_TOUCHPAD ? tp :
+           w->device == NDC_DEV_TOUCHSCREEN ? touch :
+           w->device == NDC_DEV_KBM ? kbm : -1;
   if (fd < 0)
     return 0;
   struct input_event ev;
@@ -377,6 +405,9 @@ static int inject_event(int kbm, int tp, const struct ndc_input *w) {
   if (ev.type != EV_SYN && ev.type != EV_KEY && ev.type != EV_REL &&
       ev.type != EV_ABS)
     return 0;
+  if (w->reserved0 || w->reserved1 ||
+      (w->device == NDC_DEV_TOUCHSCREEN && !nd_touch_event_valid(ev.type, ev.code, ev.value)))
+    return -1;
   ssize_t n;
   do {
     n = write(fd, &ev, sizeof(ev));
@@ -484,6 +515,7 @@ struct server_stream {
   char connector[NDC_NAME_MAX];
   char output[NDC_NAME_MAX];
   char encoder_name[64];
+  char touch_device[64];
   uint8_t key[ND_KEY_SIZE];
   pid_t video_pid;
   int lifecycle_started;
@@ -617,7 +649,7 @@ static int recv_expected(int fd, uint16_t expected, void *payload,
 
 static int run_stream_hook(const struct host_cfg *cfg, const char *peer,
                            const struct server_stream *st, const char *cmd) {
-  char vars[9][256];
+  char vars[10][256];
   snprintf(vars[0], sizeof(vars[0]), "ND_PEER_IP=%s", peer);
   snprintf(vars[1], sizeof(vars[1]), "ND_OUTPUT=%s", st->output);
   snprintf(vars[2], sizeof(vars[2]), "ND_CONNECTOR=%s", st->connector);
@@ -628,16 +660,18 @@ static int run_stream_hook(const struct host_cfg *cfg, const char *peer,
   snprintf(vars[7], sizeof(vars[7]), "ND_REFRESH_HZ=%d", st->refresh_hz);
   snprintf(vars[8], sizeof(vars[8]), "ND_DISPLAY_ID=%u", st->display_id);
 
+  snprintf(vars[9], sizeof(vars[9]), "ND_TOUCH_DEVICE=%s", st->touch_device);
+
   size_t inherited = 0;
   while (environ[inherited])
     inherited++;
-  char **envp = calloc(inherited + 10u, sizeof(*envp));
+  char **envp = calloc(inherited + 11u, sizeof(*envp));
   if (!envp)
     return -1;
   size_t n = 0;
   for (size_t i = 0; i < inherited; i++) {
     int replace = 0;
-    for (size_t v = 0; v < 9; v++) {
+    for (size_t v = 0; v < 10; v++) {
       size_t key_len = (size_t)(strchr(vars[v], '=') - vars[v]);
       if (!strncmp(environ[i], vars[v], key_len) &&
           environ[i][key_len] == '=') {
@@ -648,7 +682,7 @@ static int run_stream_hook(const struct host_cfg *cfg, const char *peer,
     if (!replace)
       envp[n++] = environ[i];
   }
-  for (size_t v = 0; v < 9; v++)
+  for (size_t v = 0; v < 10; v++)
     envp[n++] = vars[v];
   envp[n] = NULL;
 
@@ -677,7 +711,7 @@ static void *session_main(void *opaque) {
   memset(streams, 0, sizeof(streams));
   for (unsigned i = 0; i < NDC_MAX_DISPLAYS; i++)
     streams[i].video_pid = -1;
-  int kbm = -1, tp = -1, attached = 0;
+  int kbm = -1, tp = -1, touch = -1, attached = 0;
   unsigned count = 0;
   struct nd_power_rx power_rx = {0};
   struct nd_power_sink power_sink;
@@ -814,6 +848,9 @@ static void *session_main(void *opaque) {
   /* Lifecycle hooks run only after codec/backend negotiation succeeded. */
   for (unsigned i = 0; i < count; i++) {
     struct server_stream *st = &streams[i];
+    if (i == 0 && cfg->input_enabled && (requested & NDC_FLAG_WANT_INPUT) &&
+        (requested & NDC_FLAG_TOUCHSCREEN))
+      snprintf(st->touch_device, sizeof(st->touch_device), "netdisplay-touch-%u", ctx->serial);
     if (cfg->connect_cmd[0]) {
       int rc = run_stream_hook(cfg, ctx->peer, st, cfg->connect_cmd);
       if (rc) {
@@ -836,8 +873,11 @@ static void *session_main(void *opaque) {
       input_allowed = 0;
     }
   }
+  if (input_allowed && (requested & NDC_FLAG_TOUCHSCREEN))
+    touch = create_touchscreen_uinput(ctx->serial);
   struct ndc_welcome welcome = {
       .flags = htonl((input_allowed ? NDC_FLAG_INPUT_ALLOWED : 0) |
+                     (touch >= 0 ? NDC_FLAG_TOUCHSCREEN : 0) |
                      (requested & NDC_FLAG_NETWORK_TEST) |
                      (cfg->power_devices ? requested & NDC_FLAG_POWER_INFO : 0) |
                      (encrypted ? NDC_FLAG_FRAME_ENCRYPT : 0)),
@@ -929,7 +969,7 @@ static void *session_main(void *opaque) {
     if (type == NDC_INPUT && input_allowed && len == sizeof(struct ndc_input)) {
       struct ndc_input in;
       memcpy(&in, b, sizeof(in));
-      if (inject_event(kbm, tp, &in) < 0)
+      if (inject_event(kbm, tp, touch, &in) < 0)
         goto done;
     } else if (type >= NDC_POWER_BEGIN && type <= NDC_POWER_END &&
                cfg->power_devices && (requested & NDC_FLAG_POWER_INFO)) {
@@ -955,6 +995,7 @@ done:
     nd_display_state_detach(ctx->display_state, c);
   destroy_ui(&kbm);
   destroy_ui(&tp);
+  destroy_ui(&touch);
   for (unsigned i = 0; i < count; i++) {
     ndc_stop_child(&streams[i].video_pid);
     if (streams[i].lifecycle_started && cfg->disconnect_cmd[0])

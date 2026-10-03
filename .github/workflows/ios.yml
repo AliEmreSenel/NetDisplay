@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'ios/**'
+      - 'steamvr/motion*'
       - 'src/crypto.c'
       - 'src/crypto.h'
       - 'src/proto.h'
@@ -14,6 +15,7 @@ on:
   pull_request:
     paths:
       - 'ios/**'
+      - 'steamvr/motion*'
       - 'src/crypto.c'
       - 'src/crypto.h'
       - 'src/proto.h'

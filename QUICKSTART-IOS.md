@@ -120,3 +120,14 @@ The demo is deliberately a small test renderer, not a high-performance game engi
 Telemetry reports TCP round-trip, video assembly, decoding, local receive-to-GPU-submit, frame drops, measured motion sample rate, and thermal state. Those numbers **do not measure end-to-end motion-to-photon latency** and do not include screen scanout. The 120 Hz motion update request is a preference; the actual delivered rate is shown. No latency, optical accuracy, or USB throughput figure is guaranteed by this package.
 
 Read [ios/README.md](ios/README.md) for architecture, development, and limitations.
+
+## Touch Display and SteamVR
+
+Choose **Viewer → Touch Display** for desktop interaction. Enable
+`input_enabled=1` and update the server's touch-output mapping hook from
+`config/server.conf.example`; see [touch setup](ios/README.md#touch-display).
+
+Choose **Viewer → VR / SteamVR** for headset use. Build, pair and register the
+[Linux SteamVR driver](steamvr/README.md), then stream its stereo compositor
+window. The driver emulates a rotation-tracked HMD; live SteamVR rendering and
+physical-device integration still require validation.

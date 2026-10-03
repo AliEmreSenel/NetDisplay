@@ -22,6 +22,8 @@
 #define NDC_FLAG_PASSWORD (1u << 3)
 #define NDC_FLAG_NETWORK_TEST (1u << 4)
 #define NDC_FLAG_POWER_INFO (1u << 5)
+/* Optional v6 extension: direct multitouch, acknowledged only when available. */
+#define NDC_FLAG_TOUCHSCREEN (1u << 6)
 /* Compatibility name for protocol-v5 implementations predating passwords. */
 #define NDC_FLAG_HAVE_PSK NDC_FLAG_AUTH_REQUIRED
 
@@ -42,6 +44,7 @@ enum ndc_video_codec {
 
 #define NDC_DEV_KBM 1u
 #define NDC_DEV_TOUCHPAD 2u
+#define NDC_DEV_TOUCHSCREEN 3u
 
 enum ndc_type {
   NDC_HELLO = 1,

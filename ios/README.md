@@ -14,9 +14,11 @@ Start with [the repository quickstart](../QUICKSTART-IOS.md). Read [validation](
 | Video network | Manual IPv4; UDP bound to the iPhone address used by TCP; validates remote IP/session/fragment sizes |
 | Decoding | H.264 first; optional hardware HEVC, no AV1 advertisement; Annex-B conversion to VideoToolbox samples |
 | Queues | One assembling frame, one pending compressed frame, one synchronous decode, one latest decoded image, one GPU command buffer in flight |
+| Viewer modes | Touch Display with direct multitouch forwarding, or VR / SteamVR |
 | Display | One stream; flat, duplicated mono, or side-by-side stereo; manual optical controls and eye swap |
 | Test scenes | Calibration grid and a local orientation-driven room |
 | Head motion | Relative quaternion, raw Core Motion quaternion, angular velocity, user acceleration, timestamps, sequence, session, recenter generation |
+| SteamVR | Linux OpenVR HMD driver, stereo display geometry, authenticated 3DoF poses; see [setup](../steamvr/README.md) |
 | Motion transport | Independent HMAC-authenticated UDP; companion Python receiver and Linux stereo test renderer |
 | Diagnostics | Local pipeline timings and counters, observed motion rate, thermal state, explicit user-shareable report |
 | CI | Standard GitHub macOS runner builds an unsigned IPA without Apple secrets |
@@ -113,9 +115,36 @@ Video encryption is optional to preserve server compatibility and defaults off. 
 
 The source requests only Local Network and Motion usage permissions. It avoids multicast discovery and privileged entitlements. The privacy manifest describes local UserDefaults and uptime use. Device/Apple policies and third-party signing-tool compatibility can change independently of the source.
 
+## Touch Display
+
+Select **Touch Display** before connecting. It presents the full desktop with
+aspect-fit coordinates and forwards up to ten simultaneous contacts, contact
+size, available pressure, movement, releases and cancellations through the
+existing authenticated TCP control connection. Gestures in the video area are
+left to the host; viewer controls occupy a separate toolbar. Letterbox taps are
+ignored and drags leaving the image clamp to its edge. iOS-reserved system
+gestures cannot be captured by an application; pressure is sent when UIKit
+provides it. This does not add a software keyboard, mouse emulation or Pencil
+hover/tilt forwarding.
+
+Set `input_enabled=1` on the server and allow its service user to open
+`/dev/uinput`. The optional v6 `TOUCHSCREEN` capability (bit 6, alongside input
+bit 0) must be acknowledged; older hosts remain video-only and show a notice.
+Input device 3 is a direct type-B touchscreen with ten slots and 0…65535 X/Y.
+Each touch frame ends with SYN_REPORT; negative tracking ID ends a contact.
+The server destroys the virtual device at disconnect to release all touches.
+
+Update your server's `connect_cmd` from `config/server.conf.example`. It maps
+`ND_TOUCH_DEVICE` to `ND_OUTPUT` with Hyprland's per-device configuration. For an
+existing custom hook, add `hl.device({ name = '$ND_TOUCH_DEVICE', output =
+'$ND_OUTPUT' })` when the variable is nonempty. The device name is unique per
+session (`netdisplay-touch-N`), and is configured before uinput creation. This
+mapping is necessary on hosts with multiple displays. Existing keyboard and
+mouse forwarding remains available to desktop clients.
+
 ## Scope exclusions
 
-No eye/gaze tracking, foveated encoding, six-degree-of-freedom position, hand tracking, controllers, audio streaming, desktop input injection, SteamVR driver, OpenXR runtime, app-store distribution, measured motion-to-photon performance, or calibrated Cobra optical model is included. The Linux demo provides a way to exercise the implemented motion return path without claiming game compatibility.
+No eye/gaze tracking, foveated encoding, six-degree-of-freedom position, hand tracking, controllers, audio streaming, OpenXR runtime, app-store distribution, measured motion-to-photon performance, or calibrated Cobra optical model is included. The Linux demo exercises motion independently. The SteamVR driver uses an extended desktop compositor; live game compatibility remains unverified.
 
 ## References
 

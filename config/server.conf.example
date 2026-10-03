@@ -47,10 +47,12 @@ input_enabled=0
 # LOCAL lifecycle hooks only. The network protocol has no command/string field.
 # Invoked once per display. Environment: ND_PEER_IP ND_OUTPUT ND_CONNECTOR
 # ND_DISPLAY_ID ND_VIDEO_PORT ND_CONTROL_PORT ND_WIDTH ND_HEIGHT ND_REFRESH_HZ
+# ND_TOUCH_DEVICE (nonempty on the first display of a direct-touch session).
+# Bind that device to its streamed output, so taps do not hit another monitor.
 # Hyprland's current live configuration API is Lua. Remove only this session's
 # exact output name first so a stale connector left by a crashed/restarted
 # daemon cannot make `output create` fail with "Name already taken".
-connect_cmd=hyprctl output remove "$ND_OUTPUT" >/dev/null 2>&1 || true; hyprctl output create headless "$ND_OUTPUT" && hyprctl eval "hl.monitor({ output = '$ND_OUTPUT', mode = '${ND_WIDTH}x${ND_HEIGHT}@${ND_REFRESH_HZ}', position = 'auto', scale = 1 })"
+connect_cmd=hyprctl output remove "$ND_OUTPUT" >/dev/null 2>&1 || true; hyprctl output create headless "$ND_OUTPUT" && hyprctl eval "hl.monitor({ output = '$ND_OUTPUT', mode = '${ND_WIDTH}x${ND_HEIGHT}@${ND_REFRESH_HZ}', position = 'auto', scale = 1 })" && { [ -z "$ND_TOUCH_DEVICE" ] || hyprctl eval "hl.device({ name = '$ND_TOUCH_DEVICE', output = '$ND_OUTPUT' })"; }
 disconnect_cmd=hyprctl output remove "$ND_OUTPUT"
 
 # Mirror receiver batteries and chargers as native device-scoped power supplies.

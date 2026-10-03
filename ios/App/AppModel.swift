@@ -49,7 +49,7 @@ final class AppModel: ObservableObject {
         c.onConnected = { [weak self] info in
             guard let self = self, self.connectionID == id else { return }
             self.info = info; self.connected = true; self.status = "Streaming"
-            if self.settings.sendMotion, self.token.count == 32 {
+            if self.settings.viewerPurpose == .vr, self.settings.sendMotion, self.token.count == 32 {
                 self.motion.setDestination(host: self.settings.host, localIP: info.localIP,
                     port: UInt16(self.settings.motionPort), token: self.token)
             }
@@ -63,7 +63,7 @@ final class AppModel: ObservableObject {
             if let error = error { self.errorText = error }
         }
         connection = c
-        motion.start(cameraOnLeft: settings.cameraOnLeft)
+        if settings.viewerPurpose == .vr { motion.start(cameraOnLeft: settings.cameraOnLeft) }
         UIApplication.shared.isIdleTimerDisabled = true
         c.start()
     }
@@ -75,13 +75,15 @@ final class AppModel: ObservableObject {
     }
     func openViewer(test: Int) {
         testMode = test
-        if !busy { motion?.start(cameraOnLeft: settings.cameraOnLeft) }
+        if !busy || test > 0 { motion?.start(cameraOnLeft: settings.cameraOnLeft) }
         showingViewer = true; UIApplication.shared.isIdleTimerDisabled = true
     }
     func closeViewer() {
         showingViewer = false
-        if !busy { motion?.stop(); UIApplication.shared.isIdleTimerDisabled = false }
+        if !busy || settings.viewerPurpose == .touch { motion?.stop() }
+        if !busy { UIApplication.shared.isIdleTimerDisabled = false }
     }
+    func sendInput(_ messages: [ControlMessage]) { connection?.sendInput(messages) }
     func recenter() { motion?.recenter() }
     func copyMotionToken() {
         guard token.count == 32 else { errorText = "Motion key is unavailable. Unlock the phone and relaunch."; return }

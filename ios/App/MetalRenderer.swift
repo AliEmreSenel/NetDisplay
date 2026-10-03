@@ -61,7 +61,7 @@ final class MetalRenderer: NSObject, @preconcurrency MTKViewDelegate {
         var yTex = dummyY, uvTex = dummyUV
         var params = RenderParameters()
         params.dimensions = SIMD4(Float(view.drawableSize.width), Float(view.drawableSize.height), 1920,1080)
-        params.controls = SIMD4(settings.viewerMode.shaderValue, settings.swapEyes ? 1 : 0, settings.verticalShift, Float(testMode))
+        params.controls = SIMD4(settings.renderMode.shaderValue, settings.swapEyes ? 1 : 0, settings.verticalShift, Float(testMode))
         params.lens = SIMD4(settings.lensCorrection ? settings.k1 : 0, settings.lensCorrection ? settings.k2 : 0,
                             settings.imageScale, settings.lensCenterShift)
         params.color.z = settings.demoFOV * .pi / 180

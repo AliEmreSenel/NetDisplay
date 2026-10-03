@@ -1,0 +1,16 @@
+{
+  "driver_netdisplay": {
+    "enable": true,
+    "width": 1920,
+    "height": 1080,
+    "windowX": 0,
+    "windowY": 0,
+    "frequency": 60.0,
+    "ipd": 0.064,
+    "verticalFov": 90.0,
+    "motionPort": 5010,
+    "bindAddress": "127.0.0.1",
+    "peerAddress": "127.0.0.1",
+    "tokenFile": ""
+  }
+}

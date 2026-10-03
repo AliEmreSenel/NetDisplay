@@ -80,19 +80,28 @@ struct MainView: View {
     private var viewerTab: some View {
         NavigationStack {
             Form {
-                Section("Cobra / manual optics") {
-                    Picker("Presentation", selection: $model.settings.viewerMode) { ForEach(ViewerMode.allCases) { Text($0.rawValue).tag($0) } }
-                    Toggle("Phone camera on the left", isOn: $model.settings.cameraOnLeft).disabled(model.busy)
-                    Toggle("Swap stereo eyes", isOn: $model.settings.swapEyes)
-                    Toggle("Lens correction", isOn: $model.settings.lensCorrection)
-                    knob("Radial k1", value: $model.settings.k1, range: -0.5...0.8)
-                    knob("Radial k2", value: $model.settings.k2, range: -0.3...0.5)
-                    knob("Image scale", value: $model.settings.imageScale, range: 0.65...1.6)
-                    knob("Optical center shift", value: $model.settings.lensCenterShift, range: -0.15...0.15)
-                    knob("Vertical center shift", value: $model.settings.verticalShift, range: -0.15...0.15)
-                    Toggle("Show statistics in viewer", isOn: $model.settings.showHUD)
-                    Text("These are manual controls, not a measured Cobra profile. Optical center shift is not renderer IPD. Start with correction off and use the grid. Test seated; stop if uncomfortable.")
+                Section("Viewer mode") {
+                    Picker("Mode", selection: $model.settings.viewerPurpose) {
+                        ForEach(ViewerPurpose.allCases) { Text($0.rawValue).tag($0) }
+                    }.disabled(model.busy)
+                    Text("Touch Display forwards all contacts in the video area to Linux. VR displays stereo video and sends head rotation to the SteamVR driver.")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+                if model.settings.viewerPurpose == .vr {
+                    Section("Cobra / manual optics") {
+                        Picker("Presentation", selection: $model.settings.viewerMode) { ForEach(ViewerMode.allCases) { Text($0.rawValue).tag($0) } }
+                        Toggle("Phone camera on the left", isOn: $model.settings.cameraOnLeft).disabled(model.busy)
+                        Toggle("Swap stereo eyes", isOn: $model.settings.swapEyes)
+                        Toggle("Lens correction", isOn: $model.settings.lensCorrection)
+                        knob("Radial k1", value: $model.settings.k1, range: -0.5...0.8)
+                        knob("Radial k2", value: $model.settings.k2, range: -0.3...0.5)
+                        knob("Image scale", value: $model.settings.imageScale, range: 0.65...1.6)
+                        knob("Optical center shift", value: $model.settings.lensCenterShift, range: -0.15...0.15)
+                        knob("Vertical center shift", value: $model.settings.verticalShift, range: -0.15...0.15)
+                        Toggle("Show statistics in viewer", isOn: $model.settings.showHUD)
+                        Text("These are manual controls, not a measured Cobra profile. Optical center shift is not renderer IPD. Start with correction off and use the grid. Test seated; stop if uncomfortable.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Section("Local tests - no Linux connection required") {
                     HStack {
@@ -102,19 +111,21 @@ struct MainView: View {
                     knob("Test-room vertical FOV", value: $model.settings.demoFOV, range: 50...110)
                     Text("The room uses the phone's orientation locally. It does not measure streaming latency. Single tap shows controls; double tap recenters; hold to exit.").font(.caption).foregroundStyle(.secondary)
                 }
-                Section("Motion to Linux") {
-                    Toggle("Send authenticated motion UDP", isOn: $model.settings.sendMotion).disabled(model.busy)
-                    HStack { Text("Motion port"); Spacer()
-                        TextField("5010", value: $model.settings.motionPort, format: .number.grouping(.never))
-                            .keyboardType(.numberPad).multilineTextAlignment(.trailing).frame(width: 110).disabled(model.busy)
+                if model.settings.viewerPurpose == .vr {
+                    Section("Motion to Linux") {
+                        Toggle("Send authenticated motion UDP", isOn: $model.settings.sendMotion).disabled(model.busy)
+                        HStack { Text("Motion port"); Spacer()
+                            TextField("5010", value: $model.settings.motionPort, format: .number.grouping(.never))
+                                .keyboardType(.numberPad).multilineTextAlignment(.trailing).frame(width: 110).disabled(model.busy)
+                        }
+                        Button(copied ? "Token copied" : "Copy motion pairing token") {
+                            model.copyMotionToken(); copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { copied = false }
+                        }.disabled(!model.motionTokenReady)
+                        Text("Pair the SteamVR driver with this token using steamvr/README.md. For standalone tests, use pose_receiver.py or pose_demo.py instead. Motion starts after the video connection succeeds.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("3DoF rotation only. SteamVR HMD emulation is supplied in steamvr/. No positional tracking, controllers, gaze tracking, foveation or audio.").font(.caption).foregroundStyle(.secondary)
                     }
-                    Button(copied ? "Token copied" : "Copy motion pairing token") {
-                        model.copyMotionToken(); copied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { copied = false }
-                    }.disabled(!model.motionTokenReady)
-                    Text("Paste the token into a private file on Linux, then start tools/ios/pose_receiver.py or pose_demo.py with --token-file. Do not commit the token. Motion starts transmitting after the video control connection succeeds.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("3DoF rotation only. No positional tracking, gaze tracking, foveation, audio, SteamVR driver or OpenXR runtime is included.").font(.caption).foregroundStyle(.secondary)
                 }
             }.navigationTitle("Viewer & motion").navigationBarTitleDisplayMode(.inline)
         }
@@ -151,10 +162,10 @@ struct MainView: View {
             Form {
                 Section("USB hotspot") {
                     Text("Connect a data-capable Lightning cable. Enable Personal Hotspot and trust Linux. On Linux, inspect ip -br addr and find the IPv4 address assigned to the iPhone USB interface. Enter that LINUX address in Connect. Grant this app Local Network permission.")
-                    Text("The USB connection carries IP packets, not display input. Carrier/iOS policy can affect whether tethering is available. Do not assume a particular subnet or Wi-Fi network name.")
+                    Text("Video, touch and motion travel over the USB IP connection. Carrier/iOS policy can affect whether tethering is available. Do not assume a particular subnet or Wi-Fi network name.")
                 }
                 Section("First run") {
-                    Text("1. Use the calibration grid and motion room.\n2. Start your existing NetDisplay server.\n3. Connect with matching authentication/encryption settings.\n4. For a normal desktop select Mono in both eyes or Flat screen.\n5. For real stereo run the included Linux pose demo, move it to the named Hyprland output, and select Side-by-side stereo.")
+                    Text("1. Use the calibration grid and motion room.\n2. Start your existing NetDisplay server.\n3. Connect with matching authentication/encryption settings.\n4. For a normal desktop select Touch Display in Viewer.\n5. For VR select VR / SteamVR, install the driver using steamvr/README.md, and place its stereo compositor window on the streamed output. The pose demo is available for standalone tests.")
                 }
                 Section("Free signing") {
                     Text("Build the unsigned IPA with the repository's iOS workflow. Sign/install it locally with iloader or SideStore and your free Apple Account. Free provisioning expires after seven days; SideStore itself uses one of the three app slots. The GitHub workflow never needs Apple credentials.")
@@ -187,6 +198,31 @@ struct ViewerScreen: View {
     @State private var countdown = 0
     @State private var centerTask: Task<Void, Never>?
     var body: some View {
+        Group {
+            if model.settings.viewerPurpose == .touch && model.testMode == 0 { touchViewer }
+            else { immersiveViewer }
+        }
+    }
+    private var touchViewer: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button { model.closeViewer() } label: { Label("Exit", systemImage: "xmark") }
+                Spacer()
+                Text(model.info?.touchAllowed == true ? "Touch Display" : "Touch unavailable: update server and enable input_enabled=1")
+                    .font(.caption)
+                Spacer()
+            }.padding(8)
+            ZStack {
+                MetalSurface(frames: model.frames, diagnostics: model.diagnostics, settings: model.settings,
+                             testMode: 0, onError: { model.errorText = $0 })
+                if model.info?.touchAllowed == true {
+                    TouchSurface(width: model.settings.dimensions.0, height: model.settings.dimensions.1,
+                                 send: model.sendInput)
+                }
+            }
+        }.background(.black).statusBarHidden().persistentSystemOverlays(.hidden)
+    }
+    private var immersiveViewer: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             MetalSurface(frames: model.frames, diagnostics: model.diagnostics, settings: model.settings,

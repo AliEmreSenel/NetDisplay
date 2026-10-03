@@ -122,3 +122,24 @@ jobs:
             ./kernel/tests/run-vm.sh
           KERNEL_RELEASE="$release" KERNEL_IMAGE="$RUNNER_TEMP/netdisplay-test-kernel" \
             ./tests/run-input-vm.sh
+
+  steamvr:
+    name: SteamVR Linux driver
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install dependencies and pinned OpenVR headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential cmake pkg-config libsodium-dev
+          git clone https://github.com/ValveSoftware/openvr.git "$RUNNER_TEMP/openvr"
+          git -C "$RUNNER_TEMP/openvr" checkout 0924064316de3effbcd1acf1e309182a2deb1c05
+      - name: Build and test driver
+        run: |
+          cmake -S steamvr -B build-steamvr -DCMAKE_BUILD_TYPE=Release \
+            -DOPENVR_INCLUDE_DIR="$RUNNER_TEMP/openvr/headers"
+          cmake --build build-steamvr --parallel 2
+          ctest --test-dir build-steamvr --output-on-failure

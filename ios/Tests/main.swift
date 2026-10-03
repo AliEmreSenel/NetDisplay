@@ -57,4 +57,19 @@ let motion = MotionSample(sequence: 7, session: 0x0102030405060708, sampleNS: 12
 check(motion.body.count == 96, "motion body size")
 check(Array(motion.body.prefix(12)) == [78,68,77,49,0,1,0,1,0,0,0,7], "motion header bytes")
 if CommandLine.arguments.count > 1 { try motion.body.write(to: URL(fileURLWithPath: CommandLine.arguments[1])) }
+let touchHello = Wire.hello(nonce: Data(repeating: 0, count: 16), encrypt: false, haveKey: false, codecs: 1, touch: true)
+check(Array(touchHello.prefix(4)) == [0, 0, 0, 65], "touch capability request")
+check(TouchWire.position(x: 0, y: 0, width: 200, height: 100, sourceWidth: 100, sourceHeight: 100, clamp: false) == nil, "letterbox taps ignored")
+let center = TouchWire.position(x: 100, y: 50, width: 200, height: 100, sourceWidth: 100, sourceHeight: 100, clamp: false)!
+check(center.0 == 32768 && center.1 == 32768, "touch maps to video center")
+let edge = TouchWire.position(x: 300, y: -1, width: 200, height: 100, sourceWidth: 100, sourceHeight: 100, clamp: true)!
+check(edge.0 == 65535 && edge.1 == 0, "drag clamps outside video")
+let touches = TouchWire.frame(contacts: [TouchContact(slot: 0, x: 10, y: 20, pressure: 255, major: 8),
+    TouchContact(slot: 1, x: 30, y: 40, pressure: 100, major: 6)], began: [0, 1], ended: [])
+check(touches.count == 16, "two contacts in one SYN frame")
+check(touches.last!.payload == Data([3,0,0,0,0,0,0,0,0,0,0,0]), "touch SYN report")
+let releases = TouchWire.frame(contacts: [], began: [], ended: [0, 1])
+check(releases.count == 6, "all contacts release together")
+check(releases[2].payload == Data([3,0,0,3,0,57,0,0,255,255,255,255]), "signed tracking release wire format")
+check(releases[0].payload == Data([3,0,0,1,1,74,0,0,0,0,0,0]), "BTN_TOUCH release")
 print("PASS: \(checks) Swift protocol / Annex-B / motion checks")

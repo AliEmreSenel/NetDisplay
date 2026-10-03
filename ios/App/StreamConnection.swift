@@ -9,6 +9,7 @@ struct ConnectedInfo {
     let stream: StreamDescription
     let codec: String
     let encrypted: Bool
+    let touchAllowed: Bool
 }
 final class StreamConnection {
     private let settings: AppSettings
@@ -17,6 +18,9 @@ final class StreamConnection {
     private let queue = DispatchQueue(label: "netdisplay.control", qos: .userInitiated)
     private let frames: FrameStore
     private let diagnostics: Diagnostics
+    private let inputLock = NSLock()
+    private var pendingInput = [ControlMessage]()
+    private var inputAllowed = false
     private let generation: UInt64
     var onStatus: (@MainActor (String) -> Void)?
     var onConnected: (@MainActor (ConnectedInfo) -> Void)?
@@ -28,6 +32,22 @@ final class StreamConnection {
     }
     func start() { queue.async { self.run() } }
     func stop() { lifetime.cancel() }
+    func sendInput(_ messages: [ControlMessage]) {
+        inputLock.lock()
+        guard inputAllowed else { inputLock.unlock(); return }
+        // Never drop contact releases. Disconnect on sustained backpressure;
+        // destroying the server's uinput device releases every active contact.
+        if pendingInput.count + messages.count > 4096 {
+            inputAllowed = false; pendingInput.removeAll(); inputLock.unlock()
+            lifetime.cancel(); return
+        }
+        pendingInput.append(contentsOf: messages)
+        inputLock.unlock()
+    }
+    private func takeInput() -> [ControlMessage] {
+        inputLock.lock(); defer { inputLock.unlock() }
+        let messages = pendingInput; pendingInput.removeAll(keepingCapacity: true); return messages
+    }
     private func status(_ text: String) { DispatchQueue.main.async { [weak self] in self?.onStatus?(text) } }
     private func run() {
         var fd: Int32 = -1
@@ -36,6 +56,7 @@ final class StreamConnection {
         var key = [UInt8]()
         var finalError: String?
         defer {
+            inputLock.lock(); inputAllowed = false; pendingInput.removeAll(); inputLock.unlock()
             receiver?.stop(); decoder?.stop(); Crypto.wipe(&key)
             if fd >= 0 { lifetime.finish(fd) }
             let problem = lifetime.isCancelled ? nil : finalError
@@ -53,7 +74,7 @@ final class StreamConnection {
             var codecMask: UInt32 = 1
             if settings.allowHEVC && VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) { codecMask |= 2 }
             try SocketIO.sendMessage(fd, ControlMessage(.hello, Wire.hello(nonce: Data(cn),
-                encrypt: settings.encryptVideo, haveKey: !key.isEmpty, codecs: codecMask)))
+                encrypt: settings.encryptVideo, haveKey: !key.isEmpty, codecs: codecMask, touch: settings.viewerPurpose == .touch)))
             let challenge = try SocketIO.readMessage(fd)
             try challenge.require(.challenge, size: 20)
             var cr = ByteReader(challenge.payload)
@@ -84,6 +105,7 @@ final class StreamConnection {
             guard count == 1, codec == 1 || (codec == 2 && codecMask & 2 != 0),
                   ((selectedFlags & 2) != 0) == settings.encryptVideo,
                   selectedFlags & 16 == 0 else { throw NDError.message("Unsupported server negotiation") }
+            let touchAllowed = settings.viewerPurpose == .touch && selectedFlags & 65 == 65
             let streamMessage = try SocketIO.readMessage(fd); try streamMessage.require(.stream, size: 84)
             let stream = try StreamDescription(streamMessage.payload)
             guard stream.width == width, stream.height == height, stream.fps == UInt16(settings.fps) else {
@@ -99,17 +121,19 @@ final class StreamConnection {
                 session: stream.sessionID, key: streamKey, diagnostics: diagnostics) { [weak video] in video?.submit($0) }
             try SocketIO.sendMessage(fd, ControlMessage(.streamReady, Wire.streamReady()))
             SocketIO.timeout(fd, seconds: 5)
-            let info = ConnectedInfo(localIP: localIP, stream: stream, codec: codec == 2 ? "HEVC" : "H.264", encrypted: settings.encryptVideo)
+            let info = ConnectedInfo(localIP: localIP, stream: stream, codec: codec == 2 ? "HEVC" : "H.264", encrypted: settings.encryptVideo, touchAllowed: touchAllowed)
+            inputLock.lock(); inputAllowed = touchAllowed; inputLock.unlock()
             DispatchQueue.main.async { [weak self] in self?.onConnected?(info) }
             var pingTime: UInt64 = 0, lastPing: UInt64 = 0, lastPong = nd_ios_now_ns()
             while !lifetime.isCancelled {
+                for message in takeInput() { try SocketIO.sendMessage(fd, message) }
                 let now = nd_ios_now_ns()
                 if now - lastPing >= 1_000_000_000 && pingTime == 0 {
                     try SocketIO.sendMessage(fd, ControlMessage(.ping)); pingTime = now; lastPing = now
                 }
                 if now - lastPong > 10_000_000_000 { throw NDError.message("Server heartbeat timed out") }
                 var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-                let ready = Darwin.poll(&p, 1, 100)
+                let ready = Darwin.poll(&p, 1, 8)
                 if ready < 0 { if errno == EINTR { continue }; throw SocketIO.error("Control poll") }
                 if ready == 0 { continue }
                 let message = try SocketIO.readMessage(fd)

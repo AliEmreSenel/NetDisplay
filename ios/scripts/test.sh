@@ -21,6 +21,11 @@ ${CC:-cc} -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra \
   $SODIUM_TEST_LIBS -o "$OUT/wire-tests"
 "$OUT/wire-tests" "$OUT"
 python3 "$ROOT/ios/Tests/test_cross_language.py" "$OUT"
+# Verify the SteamVR parser against a real Swift -> C HMAC fixture too.
+# shellcheck disable=SC2086
+${CXX:-c++} -std=c++17 -Wall -Wextra $SODIUM_TEST_CFLAGS \
+  "$ROOT/steamvr/motion_test.cpp" $SODIUM_TEST_LIBS -o "$OUT/steamvr-motion-tests"
+"$OUT/steamvr-motion-tests" "$OUT/motion-packet.bin"
 python3 -m py_compile "$ROOT"/tools/ios/*.py "$ROOT"/ios/scripts/*.py
 swiftc -frontend -parse -swift-version 5 "$ROOT"/ios/App/*.swift "$ROOT"/ios/Core/*.swift
 python3 "$ROOT/ios/scripts/check_source.py"

@@ -77,3 +77,27 @@ xvfb-run -a python3 ios/Tests/demo_smoke.py
 ```
 
 The normal macOS CI job runs portable tests and then the actual Apple-platform build. It does not run this Linux/Xvfb test or claim to exercise a connected iPhone.
+
+## Touch Display and SteamVR acceptance checks
+
+These physical-device checks remain pending:
+
+- Build the app with Xcode / the iOS workflow, install on a real iPhone, select
+  each viewer mode, reconnect and verify settings survive relaunch.
+- With input disabled or an older server, verify Touch Display stays video-only
+  with an explicit notice. Enable input and verify the negotiated direct device.
+- On a multi-monitor host, verify corner/center taps reach the streamed output,
+  including letterboxing, portrait-sized content and after phone rotation.
+- Exercise ten simultaneous contacts, drag outside the image, lift fingers in
+  different orders, exit the viewer, interrupt with system UI, background the
+  app and disconnect the cable. No contact may remain stuck on Linux.
+- Confirm taps, double taps and long presses reach the host in Touch Display,
+  while the dedicated Exit toolbar remains usable.
+- Register the SteamVR driver using its README, verify HMD detection, left/right
+  eye separation and compositor placement on the streamed output. Launch a
+  seated application, verify rotation/recenter, and confirm tracking becomes
+  invalid within 250 ms after motion stops.
+- Verify wrong-token/wrong-peer motion is rejected; restart/reconnect both sides,
+  wake from standby and ensure tracking resumes without reviving stale poses.
+- Check target SteamVR/Hyprland extended-display compatibility, physical optics
+  and actual end-to-end latency before treating this as a usable headset.

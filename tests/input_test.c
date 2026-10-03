@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "common.h"
 #include "input_receiver.h"
+#include "touch_input.h"
 #include <poll.h>
 
 #define CHECK(x)                                                               \
@@ -12,6 +13,18 @@
     }                                                                          \
   } while (0)
 int main(void) {
+  CHECK(nd_touch_event_valid(EV_ABS, ABS_MT_SLOT, 9));
+  CHECK(!nd_touch_event_valid(EV_ABS, ABS_MT_SLOT, 10));
+  CHECK(nd_touch_event_valid(EV_ABS, ABS_MT_TRACKING_ID, -1));
+  CHECK(!nd_touch_event_valid(EV_ABS, ABS_MT_TRACKING_ID, -2));
+  CHECK(nd_touch_event_valid(EV_ABS, ABS_MT_POSITION_X, 65535));
+  CHECK(!nd_touch_event_valid(EV_ABS, ABS_MT_POSITION_Y, 65536));
+  CHECK(!nd_touch_event_valid(EV_ABS, ABS_MT_PRESSURE, 256));
+  CHECK(nd_touch_event_valid(EV_KEY, BTN_TOUCH, 0));
+  CHECK(!nd_touch_event_valid(EV_KEY, KEY_ENTER, 1));
+  CHECK(!nd_touch_event_valid(EV_REL, REL_X, 1));
+  CHECK(nd_touch_event_valid(EV_SYN, SYN_REPORT, 0));
+  CHECK(!nd_touch_event_valid(EV_SYN, SYN_DROPPED, 0));
   struct nd_input_state state = {0};
   struct nd_input_keys keyboard = {0}, second = {0}, mouse = {0};
   CHECK(nd_input_key(&state, &keyboard, NDC_DEV_KBM, 1, KEY_LEFTCTRL, 1) == 1);

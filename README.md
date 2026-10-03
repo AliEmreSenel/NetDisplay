@@ -210,3 +210,11 @@ Default ports are UDP 5000 onward for video, UDP 5001 for discovery, and TCP
 NetDisplay is licensed under the [GNU General Public License version 2
 only](LICENSE). The Wayland protocol definitions under `protocols/` retain
 their included MIT licenses.
+
+### iOS viewer modes
+
+The iOS viewer offers **Touch Display** (direct multitouch returned over the
+control connection) and **VR / SteamVR** (stereo video with authenticated head
+rotation). See [iOS setup](ios/README.md#touch-display) and the
+[Linux SteamVR HMD driver](steamvr/README.md) for build/pairing instructions and
+current hardware-validation limits.

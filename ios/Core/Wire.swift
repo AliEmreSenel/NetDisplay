@@ -95,11 +95,11 @@ struct StreamDescription {
     }
 }
 enum Wire {
-    static func hello(nonce: Data, encrypt: Bool, haveKey: Bool, codecs: UInt32) -> Data {
+    static func hello(nonce: Data, encrypt: Bool, haveKey: Bool, codecs: UInt32, touch: Bool = false) -> Data {
         precondition(nonce.count == 16)
         var w = ByteWriter()
-        // Deliberately omit network-test, input and power flags: all are optional.
-        w.u32((encrypt ? 2 : 0) | (haveKey ? 4 : 0)); w.u16(1); w.u16(0)
+        // Touch is an optional v6 extension; old hosts do not acknowledge it.
+        w.u32((encrypt ? 2 : 0) | (haveKey ? 4 : 0) | (touch ? 65 : 0)); w.u16(1); w.u16(0)
         w.u32(codecs); w.data.append(nonce); return w.data
     }
     static func display(width: UInt16, height: UInt16, fps: UInt16) -> Data {
