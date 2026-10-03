@@ -1,0 +1,64 @@
+name: iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ios/**'
+      - 'src/crypto.c'
+      - 'src/crypto.h'
+      - 'src/proto.h'
+      - 'src/control_proto.h'
+      - 'tools/ios/**'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    paths:
+      - 'ios/**'
+      - 'src/crypto.c'
+      - 'src/crypto.h'
+      - 'src/proto.h'
+      - 'src/control_proto.h'
+      - 'tools/ios/**'
+      - '.github/workflows/ios.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host test and signature-verification dependencies
+        run: brew install libsodium minisign pkgconf
+      - name: Protocol, crypto and cross-language motion tests
+        run: bash ios/scripts/test.sh
+      - name: Build native iPhone application and package unsigned IPA
+        run: bash ios/scripts/build-ipa.sh
+      - name: Validate IPA layout
+        run: python3 ios/scripts/validate_ipa.py ios/build/NetDisplay-unsigned.ipa
+      - name: Upload unsigned IPA and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetDisplay-iOS-unsigned
+          path: |
+            ios/build/NetDisplay-unsigned.ipa
+            ios/build/NetDisplay-unsigned.ipa.sha256
+            ios/build/libsodium-source.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build and test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetDisplay-iOS-logs
+          path: |
+            ios/build/build.log
+            ios/build/tests/test.log
+          if-no-files-found: ignore
+          retention-days: 14
