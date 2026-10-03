@@ -5,8 +5,10 @@ display for my Hyprland desktop. One source can drive multiple receivers, and
 each receiver can expose multiple physical displays. Video, input, DPMS,
 brightness, batteries, and chargers can all be forwarded.
 
-NetDisplay is Linux-only. The source currently requires Hyprland and NVENC; the
-receiver uses DRM/KMS and VAAPI and normally runs from a dedicated VT.
+NetDisplay is Linux-only. The source currently requires Hyprland and a supported
+FFmpeg hardware encoder; the receiver uses DRM/KMS and VAAPI and normally runs
+from a dedicated VT. Video is negotiated per session in AV1 -> HEVC/H.265 ->
+H.264 order, using only codecs both endpoints advertise as hardware-capable.
 
 ## Use it
 
@@ -40,10 +42,10 @@ the component you need:
 sudo apt install build-essential cmake pkg-config libsodium-dev
 
 # Source
-sudo apt install libwayland-dev libwayland-bin libavcodec-dev libavutil-dev
+sudo apt install libwayland-dev libwayland-bin libavcodec-dev libavutil-dev libswscale-dev
 
 # Receiver
-sudo apt install libdrm-dev libavcodec-dev libavutil-dev libva-dev
+sudo apt install libdrm-dev libavcodec-dev libavutil-dev libswscale-dev libva-dev
 ```
 
 Then run the guided installer:
@@ -82,6 +84,13 @@ automatically on a normal LAN. To connect directly, set the source address in
 host=192.168.1.20
 ```
 
+On the source, `video_codec=auto` prefers AV1, then HEVC, then H.264. Set it to
+`av1`, `hevc` (or `h265`), or `h264` to force that codec; a forced codec rejects
+incompatible receivers instead of silently downgrading. Encoder backends are
+probed at runtime (for example NVENC, QSV, AMF, or VAAPI), and the capture conversion
+uses the pixel format selected by the backend rather than a fixed NV12 wire
+assumption.
+
 With no `display=` entries, the receiver uses every connected display at its
 preferred mode. Repeat the option to select displays or modes:
 
@@ -91,7 +100,9 @@ display=HDMI-A-1,2560x1440@144
 ```
 
 The default server config creates and removes Hyprland headless outputs with
-local `hyprctl` hooks. Receivers cannot send arbitrary commands.
+local `hyprctl` hooks. Before creating an output it removes only the exact
+session-derived name, which also cleans up stale headless outputs left after an
+unclean daemon restart. Receivers cannot send arbitrary commands.
 
 For interactive authentication, generate a key and put it in
 `password_key=` on the server:

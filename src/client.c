@@ -598,6 +598,7 @@ static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int master_fd,
                                     int refresh_hz, const char *ifname,
                                     int encrypted, uint64_t wire_session,
                                     const uint8_t key[ND_KEY_SIZE],
+                                    uint16_t video_codec,
                                     int *ready_fd, int *state_fd) {
   int pfd[2], state_pipe[2], keypipe[2] = {-1, -1};
   if (pipe2(pfd, O_CLOEXEC) < 0)
@@ -623,7 +624,7 @@ static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int master_fd,
   };
   char portbuf[16], drmfdbuf[16], connectorbuf[16], crtcbuf[16];
   char readybuf[16], statebuf[16], widthbuf[16], heightbuf[16], refreshbuf[16];
-  char encryptedbuf[8], keyfdbuf[16], sessionbuf[32];
+  char encryptedbuf[8], keyfdbuf[16], sessionbuf[32], codecbuf[16];
   snprintf(sessionbuf, sizeof(sessionbuf), "%llx", (unsigned long long)wire_session);
   snprintf(portbuf, sizeof(portbuf), "%d", video_port);
   snprintf(drmfdbuf, sizeof(drmfdbuf), "%d", CHILD_DRM_FD);
@@ -636,6 +637,7 @@ static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int master_fd,
   snprintf(refreshbuf, sizeof(refreshbuf), "%d", refresh_hz);
   snprintf(encryptedbuf, sizeof(encryptedbuf), "%d", encrypted);
   snprintf(keyfdbuf, sizeof(keyfdbuf), "%d", encrypted ? CHILD_KEY_FD : -1);
+  snprintf(codecbuf, sizeof(codecbuf), "%u", (unsigned)video_codec);
   char *const av[] = {
       (char *)self_program,
       (char *)"--video-receiver",
@@ -653,6 +655,7 @@ static pid_t spawn_builtin_receiver(const struct client_cfg *cfg, int master_fd,
       encryptedbuf,
       keyfdbuf,
       sessionbuf,
+      codecbuf,
       NULL,
   };
 
@@ -814,12 +817,12 @@ int main(int argc, char **argv) {
            NETDISPLAY_VERSION, NDC_VERSION);
     return 0;
   }
-  if ((argc == 15 || argc == 16) && !strcmp(argv[1], "--video-receiver"))
+  if (argc == 17 && !strcmp(argv[1], "--video-receiver"))
     return main_receiver(atoi(argv[2]), atoi(argv[3]), atoi(argv[4]),
                          atoi(argv[5]), argv[6], argv[7], atoi(argv[8]),
                          atoi(argv[9]), atoi(argv[10]), atoi(argv[11]),
                          atoi(argv[12]), atoi(argv[13]), atoi(argv[14]),
-                         argc == 16 ? strtoull(argv[15], NULL, 16) : 0);
+                         strtoull(argv[15], NULL, 16), (uint16_t)atoi(argv[16]));
   if (argc > 2) {
     fprintf(stderr, "usage: %s [CLIENT_CONFIG]\n", argv[0]);
     return 1;
@@ -913,6 +916,12 @@ int main(int argc, char **argv) {
       streams[i].display_id = (uint32_t)i + 1u;
       streams[i].display = &displays[i];
     }
+    uint32_t decoder_caps = nd_video_decoder_caps(cfg.vaapi_device);
+    if (!decoder_caps) {
+      fprintf(stderr, "no usable VAAPI hardware video decoder found\n");
+      close(s);
+      goto retry;
+    }
     struct ndc_hello hello = {
         .flags = htonl((cfg.want_input ? NDC_FLAG_WANT_INPUT : 0) |
                        NDC_FLAG_NETWORK_TEST |
@@ -920,6 +929,7 @@ int main(int argc, char **argv) {
                        (cfg.have_psk ? NDC_FLAG_HAVE_PSK : 0) |
                        (cfg.frame_encryption ? NDC_FLAG_FRAME_ENCRYPT : 0)),
         .display_count = htons((uint16_t)display_count),
+        .video_codecs = htonl(decoder_caps),
     };
     nd_crypto_random(hello.nonce, sizeof(hello.nonce));
     int session_ok = ndc_send_msg(s, NDC_HELLO, &hello, sizeof(hello)) == 0;
@@ -930,6 +940,10 @@ int main(int argc, char **argv) {
     uint32_t server_flags = session_ok ? ntohl(challenge.flags) : 0;
     int server_requires_auth = !!(server_flags & NDC_FLAG_AUTH_REQUIRED);
     int server_uses_password = !!(server_flags & NDC_FLAG_PASSWORD);
+    if (session_ok && server_uses_password && !cfg.frame_encryption)
+      fprintf(stderr,
+              "note: password authentication is enabled, but frame_encryption=0; "
+              "video UDP remains plaintext\n");
     int prompted_password = 0, authenticated = 0;
     if (session_ok && server_requires_auth && !cfg.have_psk &&
         !server_uses_password) {
@@ -998,8 +1012,14 @@ int main(int argc, char **argv) {
     if (session_ok &&
         recv_control(s, NDC_WELCOME, &welcome, sizeof(welcome)) < 0)
       session_ok = 0;
+    uint16_t video_codec = session_ok ? ntohs(welcome.video_codec) : 0;
     int input_allowed =
         session_ok && !!(ntohl(welcome.flags) & NDC_FLAG_INPUT_ALLOWED);
+    uint32_t selected_bit = video_codec == NDC_VIDEO_AV1 ? NDC_CODEC_AV1 :
+                            video_codec == NDC_VIDEO_HEVC ? NDC_CODEC_HEVC :
+                            video_codec == NDC_VIDEO_H264 ? NDC_CODEC_H264 : 0;
+    if (session_ok && (!selected_bit || !(decoder_caps & selected_bit)))
+      session_ok = 0;
     if (session_ok && ntohs(welcome.display_count) != display_count)
       session_ok = 0;
     for (int i = 0; session_ok && i < display_count; i++) {
@@ -1053,7 +1073,7 @@ int main(int argc, char **argv) {
       st->pid = spawn_builtin_receiver(&cfg, master_fd, st->display, st->port,
                                        st->width, st->height, st->refresh_hz,
                                        discovered_if, cfg.frame_encryption,
-                                       st->stream_id, key,
+                                       st->stream_id, key, video_codec,
                                        &ready_fd, &st->state_fd);
       if (st->pid < 0 || wait_receiver_ready(st->pid, ready_fd, 10000) < 0) {
         if (ready_fd >= 0)

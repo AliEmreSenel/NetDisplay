@@ -34,6 +34,7 @@ struct host_cfg {
   int input_enabled;
   int power_devices;
   int qp;
+  uint16_t video_codec; /* 0=auto */
   int max_clients;
   int max_displays_per_client;
   int max_width, max_height, max_fps;
@@ -93,6 +94,13 @@ static void load_cfg(const char *path, struct host_cfg *c) {
       c->input_enabled = atoi(v) != 0;
     else if (!strcmp(k, "qp"))
       c->qp = atoi(v);
+    else if (!strcmp(k, "video_codec")) {
+      if (!strcmp(v, "auto")) c->video_codec = 0;
+      else if (!strcmp(v, "av1")) c->video_codec = NDC_VIDEO_AV1;
+      else if (!strcmp(v, "hevc") || !strcmp(v, "h265")) c->video_codec = NDC_VIDEO_HEVC;
+      else if (!strcmp(v, "h264")) c->video_codec = NDC_VIDEO_H264;
+      else { fprintf(stderr, "invalid video_codec in %s\n", path); exit(2); }
+    }
     else if (!strcmp(k, "max_clients"))
       c->max_clients = atoi(v);
     else if (!strcmp(k, "max_displays_per_client"))
@@ -171,6 +179,10 @@ static void load_cfg(const char *path, struct host_cfg *c) {
     fprintf(stderr, "frame_encryption requires password_key or psk_file\n");
     exit(2);
   }
+  if (c->password_auth && c->frame_encryption == 0)
+    fprintf(stderr,
+            "warning: password authentication is configured but "
+            "frame_encryption=off; video UDP will remain plaintext\n");
 }
 
 static int derive_password_key_cli(void) {
@@ -468,8 +480,10 @@ struct server_stream {
   uint32_t display_id;
   uint64_t stream_id;
   int port, width, height, refresh_hz;
+  uint16_t video_codec;
   char connector[NDC_NAME_MAX];
   char output[NDC_NAME_MAX];
+  char encoder_name[64];
   uint8_t key[ND_KEY_SIZE];
   pid_t video_pid;
   int lifecycle_started;
@@ -490,7 +504,7 @@ static pid_t spawn_builtin_sender(const struct host_cfg *cfg, const char *peer,
                                   int encrypted) {
   enum { CHILD_KEY_FD = 196 };
   char portbuf[16], qpbuf[16], widthbuf[16], heightbuf[16], refreshbuf[16];
-  char sessionbuf[32], encryptedbuf[8], keyfdbuf[16];
+  char sessionbuf[32], encryptedbuf[8], keyfdbuf[16], codecbuf[16];
   snprintf(portbuf, sizeof(portbuf), "%d", st->port);
   snprintf(qpbuf, sizeof(qpbuf), "%d", cfg->qp);
   snprintf(widthbuf, sizeof(widthbuf), "%d", st->width);
@@ -500,6 +514,7 @@ static pid_t spawn_builtin_sender(const struct host_cfg *cfg, const char *peer,
            (unsigned long long)st->stream_id);
   snprintf(encryptedbuf, sizeof(encryptedbuf), "%d", encrypted);
   snprintf(keyfdbuf, sizeof(keyfdbuf), "%d", encrypted ? CHILD_KEY_FD : -1);
+  snprintf(codecbuf, sizeof(codecbuf), "%u", (unsigned)st->video_codec);
   char *const av[] = {
       (char *)self_program,
       (char *)"--video-sender",
@@ -513,6 +528,8 @@ static pid_t spawn_builtin_sender(const struct host_cfg *cfg, const char *peer,
       sessionbuf,
       encryptedbuf,
       keyfdbuf,
+      codecbuf,
+      (char *)st->encoder_name,
       NULL,
   };
 
@@ -670,8 +687,9 @@ static void *session_main(void *opaque) {
   if (recv_expected(c, NDC_HELLO, &hello, sizeof(hello)) < 0)
     goto done;
   uint32_t requested = ntohl(hello.flags);
+  uint32_t client_codecs = ntohl(hello.video_codecs) & NDC_CODEC_ALL;
   unsigned advertised_count = ntohs(hello.display_count);
-  if (!advertised_count ||
+  if (!advertised_count || !client_codecs ||
       advertised_count > (unsigned)cfg->max_displays_per_client)
     goto done;
   count = advertised_count;
@@ -737,6 +755,65 @@ static void *session_main(void *opaque) {
     if (encrypted)
       nd_crypto_stream_key(st->key, cfg->psk, st->stream_id, hello.nonce,
                            challenge.nonce);
+  }
+
+  /* Try complete codec/backend combinations once and keep the selected
+   * backend names. This avoids probing every codec twice and preserves the
+   * session-wide AV1 -> HEVC -> H.264 preference while allowing each display
+   * mode to use the best hardware backend available for that mode. */
+  uint16_t codec_order[3] = {NDC_VIDEO_AV1, NDC_VIDEO_HEVC, NDC_VIDEO_H264};
+  size_t codec_count = 3;
+  if (cfg->video_codec) {
+    codec_order[0] = cfg->video_codec;
+    codec_count = 1;
+  }
+
+  uint16_t video_codec = 0;
+  char selected_encoders[NDC_MAX_DISPLAYS][64] = {{0}};
+  for (size_t ci = 0; ci < codec_count && !video_codec; ci++) {
+    uint16_t candidate_codec = codec_order[ci];
+    uint32_t candidate_bit =
+        candidate_codec == NDC_VIDEO_AV1 ? NDC_CODEC_AV1 :
+        candidate_codec == NDC_VIDEO_HEVC ? NDC_CODEC_HEVC : NDC_CODEC_H264;
+    if (!(client_codecs & candidate_bit))
+      continue;
+
+    int usable = 1;
+    for (unsigned i = 0; i < count; i++) {
+      struct server_stream *st = &streams[i];
+      if (nd_video_choose_encoder(candidate_codec, st->width, st->height,
+                                  st->refresh_hz, cfg->qp,
+                                  selected_encoders[i],
+                                  sizeof(selected_encoders[i])) < 0) {
+        usable = 0;
+        break;
+      }
+    }
+    if (usable)
+      video_codec = candidate_codec;
+  }
+
+  if (!video_codec) {
+    fprintf(stderr, "receiver %s has no mutually usable hardware video codec%s\n",
+            ctx->peer, cfg->video_codec ? " for forced video_codec" : "");
+    (void)ndc_send_msg(c, NDC_REJECT, NULL, 0);
+    goto done;
+  }
+
+  for (unsigned i = 0; i < count; i++) {
+    struct server_stream *st = &streams[i];
+    st->video_codec = video_codec;
+    snprintf(st->encoder_name, sizeof(st->encoder_name), "%s",
+             selected_encoders[i]);
+    fprintf(stderr,
+            "receiver %s display %u selected codec=%u encoder=%s %dx%d@%d\n",
+            ctx->peer, st->display_id, (unsigned)video_codec, st->encoder_name,
+            st->width, st->height, st->refresh_hz);
+  }
+
+  /* Lifecycle hooks run only after codec/backend negotiation succeeded. */
+  for (unsigned i = 0; i < count; i++) {
+    struct server_stream *st = &streams[i];
     if (cfg->connect_cmd[0]) {
       int rc = run_stream_hook(cfg, ctx->peer, st, cfg->connect_cmd);
       if (rc) {
@@ -765,6 +842,7 @@ static void *session_main(void *opaque) {
                      (cfg->power_devices ? requested & NDC_FLAG_POWER_INFO : 0) |
                      (encrypted ? NDC_FLAG_FRAME_ENCRYPT : 0)),
       .display_count = htons((uint16_t)count),
+      .video_codec = htons(video_codec),
   };
   if (ndc_send_msg(c, NDC_WELCOME, &welcome, sizeof(welcome)) < 0)
     goto done;
@@ -816,8 +894,8 @@ static void *session_main(void *opaque) {
   if (nd_display_state_attach(ctx->display_state, c) < 0)
     goto done;
   attached = 1;
-  fprintf(stderr, "receiver %s running %u display(s), encryption %s\n",
-          ctx->peer, count, encrypted ? "on" : "off");
+  fprintf(stderr, "receiver %s running %u display(s), codec=%u encryption %s\n",
+          ctx->peer, count, (unsigned)video_codec, encrypted ? "on" : "off");
   for (;;) {
     uint64_t now_ms = nd_power_now_ms();
     nd_power_sink_expire(&power_sink, now_ms);
@@ -899,11 +977,11 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && !strcmp(argv[1], "--derive-password-key"))
     return derive_password_key_cli();
-  if (argc == 12 && !strcmp(argv[1], "--video-sender"))
+  if (argc == 14 && !strcmp(argv[1], "--video-sender"))
     return nd_video_sender_run(argv[2], argv[3], atoi(argv[4]), atoi(argv[5]),
                                atoi(argv[6]), atoi(argv[7]), atoi(argv[8]),
                                strtoull(argv[9], NULL, 10), atoi(argv[10]),
-                               atoi(argv[11]));
+                               atoi(argv[11]), (uint16_t)atoi(argv[12]), argv[13]);
 
   if (argc != 2) {
     fprintf(stderr, "usage: %s SERVER_CONFIG\n", argv[0]);

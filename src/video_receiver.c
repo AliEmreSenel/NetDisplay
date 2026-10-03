@@ -24,7 +24,12 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vaapi.h>
+#include <libavutil/mem.h>
+#include <va/va.h>
+#include <va/va_str.h>
 #include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 
 #include "common.h"
 #include "crypto.h"
@@ -556,10 +561,107 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return AV_PIX_FMT_NONE;
 }
 
-static AVCodecContext *init_decoder(const char *va_path) {
-  const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+static enum AVCodecID codec_id_from_wire(uint16_t codec) {
+  switch (codec) {
+  case NDC_VIDEO_AV1: return AV_CODEC_ID_AV1;
+  case NDC_VIDEO_HEVC: return AV_CODEC_ID_HEVC;
+  case NDC_VIDEO_H264: return AV_CODEC_ID_H264;
+  default: return AV_CODEC_ID_NONE;
+  }
+}
+
+static const char *codec_name_from_wire(uint16_t codec) {
+  switch (codec) {
+  case NDC_VIDEO_AV1: return "AV1";
+  case NDC_VIDEO_HEVC: return "HEVC";
+  case NDC_VIDEO_H264: return "H.264";
+  default: return "unknown";
+  }
+}
+
+static int decoder_has_vaapi(enum AVCodecID id) {
+  const AVCodec *codec = avcodec_find_decoder(id);
+  if (!codec)
+    return 0;
+  for (int i = 0;; i++) {
+    const AVCodecHWConfig *cfg = avcodec_get_hw_config(codec, i);
+    if (!cfg)
+      break;
+    if (cfg->device_type == AV_HWDEVICE_TYPE_VAAPI &&
+        (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
+      return 1;
+  }
+  return 0;
+}
+
+static int va_profile_has_vld(VADisplay display, VAProfile profile) {
+  int max = vaMaxNumEntrypoints(display);
+  if (max <= 0)
+    return 0;
+  VAEntrypoint *entrypoints = calloc((size_t)max, sizeof(*entrypoints));
+  if (!entrypoints)
+    return 0;
+  int count = max;
+  VAStatus status = vaQueryConfigEntrypoints(display, profile, entrypoints, &count);
+  int found = 0;
+  if (status == VA_STATUS_SUCCESS) {
+    for (int i = 0; i < count; i++)
+      if (entrypoints[i] == VAEntrypointVLD) {
+        found = 1;
+        break;
+      }
+  }
+  free(entrypoints);
+  return found;
+}
+
+uint32_t nd_video_decoder_caps(const char *va_path) {
+  if (va_path && !*va_path)
+    va_path = NULL;
+  AVBufferRef *probe = NULL;
+  if (av_hwdevice_ctx_create(&probe, AV_HWDEVICE_TYPE_VAAPI, va_path, NULL, 0) < 0)
+    return 0;
+
+  AVHWDeviceContext *device = (AVHWDeviceContext *)probe->data;
+  AVVAAPIDeviceContext *va = device ? (AVVAAPIDeviceContext *)device->hwctx : NULL;
+  if (!va || !va->display) {
+    av_buffer_unref(&probe);
+    return 0;
+  }
+
+  int max = vaMaxNumProfiles(va->display);
+  VAProfile *profiles = max > 0 ? calloc((size_t)max, sizeof(*profiles)) : NULL;
+  int count = max;
+  uint32_t caps = 0;
+  if (profiles && vaQueryConfigProfiles(va->display, profiles, &count) == VA_STATUS_SUCCESS) {
+    for (int i = 0; i < count; i++) {
+      if (!va_profile_has_vld(va->display, profiles[i]))
+        continue;
+      const char *name = vaProfileStr(profiles[i]);
+      if (!name)
+        continue;
+      if (strstr(name, "H264"))
+        caps |= NDC_CODEC_H264;
+      else if (strstr(name, "HEVC"))
+        caps |= NDC_CODEC_HEVC;
+      else if (strstr(name, "AV1"))
+        caps |= NDC_CODEC_AV1;
+    }
+  }
+  free(profiles);
+  av_buffer_unref(&probe);
+
+  if (!decoder_has_vaapi(AV_CODEC_ID_H264)) caps &= ~NDC_CODEC_H264;
+  if (!decoder_has_vaapi(AV_CODEC_ID_HEVC)) caps &= ~NDC_CODEC_HEVC;
+  if (!decoder_has_vaapi(AV_CODEC_ID_AV1)) caps &= ~NDC_CODEC_AV1;
+  return caps;
+}
+
+static AVCodecContext *init_decoder(const char *va_path, uint16_t wire_codec) {
+  enum AVCodecID codec_id = codec_id_from_wire(wire_codec);
+  const AVCodec *codec = avcodec_find_decoder(codec_id);
   if (!codec) {
-    fprintf(stderr, "H.264 decoder not found\n");
+    fprintf(stderr, "%s decoder not found\n", codec_name_from_wire(wire_codec));
     exit(EXIT_FAILURE);
   }
 
@@ -579,32 +681,44 @@ static AVCodecContext *init_decoder(const char *va_path) {
 
   ret = avcodec_open2(dec, codec, NULL);
   if (ret < 0)
-    ff_die("avcodec_open2(H.264)", ret);
+    ff_die("avcodec_open2(hardware video decoder)", ret);
   return dec;
+}
+
+static void copy_plane_rows(uint8_t *dst, int dst_stride, const uint8_t *src,
+                            int src_stride, uint32_t row_bytes, uint32_t rows) {
+  for (uint32_t y = 0; y < rows; y++)
+    memcpy(dst + (size_t)y * (size_t)dst_stride,
+           src + (size_t)y * (size_t)src_stride, row_bytes);
 }
 
 static void copy_decoded_to_nv12(const AVFrame *src, struct dumb_fb *dst,
                                  uint32_t width, uint32_t height) {
-  uint8_t *dy = dst->map;
-  uint8_t *duv = dst->map + (size_t)dst->pitch * height;
-
   if (src->width != (int)width || src->height != (int)height) {
     fprintf(stderr, "decoded size %dx%d, expected %ux%u\n", src->width,
             src->height, width, height);
     exit(EXIT_FAILURE);
   }
 
+  uint8_t *dy = dst->map;
+  uint8_t *duv = dst->map + (size_t)dst->pitch * height;
+
+  /* Keep the common 8-bit VAAPI paths exact. These were the original
+   * receiver's known-good scanout copies and avoid running already-compatible
+   * chroma through libswscale. More exotic decoder outputs still use the
+   * generic conversion fallback below. */
   if (src->format == AV_PIX_FMT_NV12) {
-    for (uint32_t y = 0; y < height; y++)
-      memcpy(dy + (size_t)y * dst->pitch,
-             src->data[0] + (size_t)y * src->linesize[0], width);
-    for (uint32_t y = 0; y < height / 2u; y++)
-      memcpy(duv + (size_t)y * dst->pitch,
-             src->data[1] + (size_t)y * src->linesize[1], width);
-  } else if (src->format == AV_PIX_FMT_YUV420P) {
-    for (uint32_t y = 0; y < height; y++)
-      memcpy(dy + (size_t)y * dst->pitch,
-             src->data[0] + (size_t)y * src->linesize[0], width);
+    copy_plane_rows(dy, (int)dst->pitch, src->data[0], src->linesize[0], width,
+                    height);
+    copy_plane_rows(duv, (int)dst->pitch, src->data[1], src->linesize[1], width,
+                    height / 2u);
+    scanout_store_fence();
+    return;
+  }
+
+  if (src->format == AV_PIX_FMT_YUV420P || src->format == AV_PIX_FMT_YUVJ420P) {
+    copy_plane_rows(dy, (int)dst->pitch, src->data[0], src->linesize[0], width,
+                    height);
     for (uint32_t y = 0; y < height / 2u; y++) {
       uint8_t *d = duv + (size_t)y * dst->pitch;
       const uint8_t *u = src->data[1] + (size_t)y * src->linesize[1];
@@ -614,13 +728,64 @@ static void copy_decoded_to_nv12(const AVFrame *src, struct dumb_fb *dst,
         d[2u * x + 1u] = v[x];
       }
     }
-  } else {
-    const char *n = av_get_pix_fmt_name((enum AVPixelFormat)src->format);
-    fprintf(stderr, "unsupported transferred pixel format %s (%d)\n",
-            n ? n : "?", src->format);
+    scanout_store_fence();
+    return;
+  }
+
+  static struct SwsContext *convert;
+  static int source_format = AV_PIX_FMT_NONE;
+  if (!convert || source_format != src->format) {
+    sws_freeContext(convert);
+    convert = sws_getContext((int)width, (int)height,
+                             (enum AVPixelFormat)src->format,
+                             (int)width, (int)height, AV_PIX_FMT_NV12,
+                             SWS_FAST_BILINEAR, NULL, NULL, NULL);
+    if (!convert) {
+      const char *n = av_get_pix_fmt_name((enum AVPixelFormat)src->format);
+      fprintf(stderr,
+              "cannot convert decoded pixel format %s (%d) to scanout NV12\n",
+              n ? n : "?", src->format);
+      exit(EXIT_FAILURE);
+    }
+    source_format = src->format;
+  }
+
+  uint8_t *dst_data[4] = {dy, duv, NULL, NULL};
+  int dst_linesize[4] = {(int)dst->pitch, (int)dst->pitch, 0, 0};
+  if (sws_scale(convert, (const uint8_t *const *)src->data, src->linesize, 0,
+                (int)height, dst_data, dst_linesize) <= 0) {
+    fprintf(stderr, "decoded pixel conversion failed\n");
     exit(EXIT_FAILURE);
   }
   scanout_store_fence();
+}
+
+static enum AVPixelFormat preferred_transfer_format(const AVFrame *hw) {
+  enum AVPixelFormat *formats = NULL;
+  if (!hw->hw_frames_ctx ||
+      av_hwframe_transfer_get_formats(hw->hw_frames_ctx,
+                                      AV_HWFRAME_TRANSFER_DIRECTION_FROM,
+                                      &formats, 0) < 0 ||
+      !formats)
+    return AV_PIX_FMT_NONE;
+
+  /* Prefer formats the DRM scanout path can consume without a colorspace
+   * conversion, then retain progressively more general software formats. */
+  static const enum AVPixelFormat preferred[] = {
+      AV_PIX_FMT_NV12, AV_PIX_FMT_YUV420P, AV_PIX_FMT_P010LE,
+      AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV422P, AV_PIX_FMT_NONE};
+  enum AVPixelFormat chosen = formats[0];
+  for (size_t want = 0; preferred[want] != AV_PIX_FMT_NONE; want++) {
+    for (size_t i = 0; formats[i] != AV_PIX_FMT_NONE; i++) {
+      if (formats[i] == preferred[want]) {
+        chosen = formats[i];
+        goto out;
+      }
+    }
+  }
+out:
+  av_free(formats);
+  return chosen;
 }
 
 static int decode_one(AVCodecContext *dec, const uint8_t *data, uint32_t size,
@@ -655,12 +820,23 @@ static int decode_one(AVCodecContext *dec, const uint8_t *data, uint32_t size,
   }
 
   av_frame_unref(sw);
+  enum AVPixelFormat transfer_format = preferred_transfer_format(hw);
+  if (transfer_format != AV_PIX_FMT_NONE)
+    sw->format = transfer_format;
   ret = av_hwframe_transfer_data(sw, hw, 0);
   if (ret < 0) {
     char b[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(ret, b, sizeof(b));
     fprintf(stderr, "VAAPI transfer seq=%u: %s\n", seq, b);
     return -1;
+  }
+  static int logged_transfer_format;
+  if (!logged_transfer_format) {
+    const char *name = av_get_pix_fmt_name((enum AVPixelFormat)sw->format);
+    fprintf(stderr,
+            "decoder software transfer=%s range=%d colorspace=%d; scanout=nv12\n",
+            name ? name : "?", sw->color_range, sw->colorspace);
+    logged_transfer_format = 1;
   }
   return 0;
 }
@@ -701,10 +877,12 @@ static void *rx_thread_main(void *opaque) {
 int main_receiver(int port, int fd, int connector_id, int requested_crtc,
                   const char *va_path, const char *interface_name, int ready_fd,
                   int width, int height, int refresh_hz, int state_fd,
-                  int encrypted, int key_fd, uint64_t wire_session) {
+                  int encrypted, int key_fd, uint64_t wire_session,
+                  uint16_t video_codec) {
   if (port <= 0 || port > 65535 || width <= 0 || width > UINT16_MAX ||
       (width & 1) || height <= 0 || height > UINT16_MAX || (height & 1) ||
-      refresh_hz <= 0 || refresh_hz > UINT16_MAX) {
+      refresh_hz <= 0 || refresh_hz > UINT16_MAX ||
+      codec_id_from_wire(video_codec) == AV_CODEC_ID_NONE) {
     fprintf(stderr, "invalid built-in video receiver parameters\n");
     return 2;
   }
@@ -792,7 +970,7 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
   }
   pthread_detach(display_thread);
 
-  AVCodecContext *dec = init_decoder(va_path);
+  AVCodecContext *dec = init_decoder(va_path, video_codec);
   AVFrame *hw = av_frame_alloc();
   AVFrame *sw = av_frame_alloc();
   if (!hw || !sw)
@@ -828,7 +1006,7 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
 
   /* Three compressed buffers, but never a queue:
    *   assembly_buf: RX is currently filling it
-   *   latest_buf:   newest completed IDR waiting for decode
+   *   latest_buf:   newest completed intra frame waiting for decode
    *   decode_buf:   decoder currently owns it
    * Pointer swaps make publication zero-copy. */
   uint8_t *assembly_buf =
@@ -867,9 +1045,10 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
   }
 
   fprintf(stderr,
-          "listening port %d for %ux%u@%d encryption=%s; RX runs continuously; "
-          "only newest complete IDR is decoded\n",
-          port, width, height, refresh_hz, encrypted ? "on" : "off");
+          "listening port %d for %ux%u@%d codec=%s encryption=%s; RX runs continuously; "
+          "only newest complete intra frame is decoded\n",
+          port, width, height, refresh_hz, codec_name_from_wire(video_codec),
+          encrypted ? "on" : "off");
 
   if (ready_fd >= 0) {
     const uint8_t ready = 1;

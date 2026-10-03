@@ -64,6 +64,7 @@ static int open_session(int port, uint32_t display_id, int advertises_key,
                      (advertises_key ? NDC_FLAG_NETWORK_TEST | NDC_FLAG_POWER_INFO : 0) |
                      NDC_FLAG_FRAME_ENCRYPT),
       .display_count = htons(1),
+      .video_codecs = htonl(NDC_CODEC_ALL),
   };
   hello.nonce[0] = (uint8_t)display_id;
   if (ndc_send_msg(fd, NDC_HELLO, &hello, sizeof(hello)) < 0)
@@ -92,8 +93,15 @@ static int open_session(int port, uint32_t display_id, int advertises_key,
   if (ndc_send_msg(fd, NDC_DISPLAY, &display, sizeof(display)) < 0)
     goto fail;
   struct ndc_welcome welcome;
-  if (recv_type(fd, NDC_WELCOME, &welcome, sizeof(welcome)) < 0 ||
-      ntohs(welcome.display_count) != 1 ||
+  uint16_t welcome_type = 0;
+  uint32_t welcome_len = sizeof(welcome);
+  int wr = ndc_recv_msg(fd, &welcome_type, &welcome, &welcome_len);
+  if (wr > 0 && welcome_type == NDC_REJECT && welcome_len == 0) {
+    close(fd);
+    return -2; /* no usable hardware codec on this test builder */
+  }
+  if (wr <= 0 || welcome_type != NDC_WELCOME || welcome_len != sizeof(welcome) ||
+      ntohs(welcome.display_count) != 1 || !ntohs(welcome.video_codec) ||
       !(ntohl(welcome.flags) & NDC_FLAG_FRAME_ENCRYPT))
     goto fail;
   struct ndc_stream stream;
@@ -164,6 +172,13 @@ int main(int argc, char **argv) {
     _exit(127);
   }
   int first = open_session(port, 1, 1, psk);
+  if (first == -2) {
+    kill(server, SIGTERM);
+    while (waitpid(server, NULL, 0) < 0 && errno == EINTR) {}
+    unlink(path);
+    puts("SKIP: no usable hardware encoder on test builder");
+    return 77;
+  }
   int second = first >= 0 ? open_session(port, 2, 0, psk) : -1;
   if (first >= 0)
     close(first);

@@ -15,4 +15,5 @@ if(NETDISPLAY_BUILD_SERVER)
     nd_add_test(netdisplay-control-test control_test.c concurrent-control-sessions
         $<TARGET_FILE:netdisplay-server>)
     add_dependencies(netdisplay-control-test netdisplay-server)
+    set_tests_properties(concurrent-control-sessions PROPERTIES SKIP_RETURN_CODE 77)
 endif()

@@ -23,9 +23,10 @@ vaapi_device=
 # the password after connecting; it is never stored here or sent over the network.
 # For unattended clients, use the same 32-byte/64-hex PSK file as the server.
 psk_file=
-# frame_encryption=0 keeps the original 24-byte plaintext UDP format and hot
-# path. The server must permit the selected mode. Encryption also requires the
-# prompted password or a configured PSK file.
+# Password/PSK authentication and video encryption are separate.
+# frame_encryption=0 authenticates when required but keeps the original
+# 24-byte plaintext UDP format. Set 1 to encrypt video frames; the server must
+# permit it, and the prompted password or configured PSK supplies the key.
 frame_encryption=0
 
 # Receiver panel backlight to update from the source: name from

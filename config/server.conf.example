@@ -30,10 +30,16 @@ password_key=
 # contains exactly 32 random bytes or 64 hexadecimal characters. Configure
 # exactly one of password_key or psk_file.
 psk_file=
-# off rejects encrypted clients; allowed accepts the client's choice; required
-# rejects plaintext clients. Encryption requires password or psk_file and is
-# never silently downgraded.
+# Password/PSK authentication and video encryption are separate. off keeps
+# video UDP plaintext even after successful authentication; allowed accepts the
+# client's choice; required rejects plaintext clients. Encryption requires a
+# password_key or psk_file and is never silently downgraded.
 frame_encryption=off
+
+# Video codec policy. auto prefers AV1, then HEVC/H.265, then H.264, but only
+# when the receiver advertises hardware decode and this source can actually open
+# a hardware encoder for every requested display. A forced codec never falls back.
+video_codec=auto
 
 # Source-side gate. A receiver cannot enable this remotely.
 input_enabled=0
@@ -41,10 +47,10 @@ input_enabled=0
 # LOCAL lifecycle hooks only. The network protocol has no command/string field.
 # Invoked once per display. Environment: ND_PEER_IP ND_OUTPUT ND_CONNECTOR
 # ND_DISPLAY_ID ND_VIDEO_PORT ND_CONTROL_PORT ND_WIDTH ND_HEIGHT ND_REFRESH_HZ
-# Hyprland's current live configuration API is Lua.  `output` still creates
-# the headless connector; `eval` applies its monitor rule.  Keep output names
-# to ordinary identifier characters if changing this command.
-connect_cmd=hyprctl output create headless "$ND_OUTPUT"; hyprctl eval "hl.monitor({ output = '$ND_OUTPUT', mode = '${ND_WIDTH}x${ND_HEIGHT}@${ND_REFRESH_HZ}', position = 'auto', scale = 1 })"
+# Hyprland's current live configuration API is Lua. Remove only this session's
+# exact output name first so a stale connector left by a crashed/restarted
+# daemon cannot make `output create` fail with "Name already taken".
+connect_cmd=hyprctl output remove "$ND_OUTPUT" >/dev/null 2>&1 || true; hyprctl output create headless "$ND_OUTPUT" && hyprctl eval "hl.monitor({ output = '$ND_OUTPUT', mode = '${ND_WIDTH}x${ND_HEIGHT}@${ND_REFRESH_HZ}', position = 'auto', scale = 1 })"
 disconnect_cmd=hyprctl output remove "$ND_OUTPUT"
 
 # Mirror receiver batteries and chargers as native device-scoped power supplies.

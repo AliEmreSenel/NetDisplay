@@ -13,7 +13,7 @@ set(CMAKE_C_EXTENSIONS ON)
 option(NETDISPLAY_BUILD_SERVER "Build netdisplay-server" ON)
 option(NETDISPLAY_BUILD_CLIENT "Build netdisplay-client" ON)
 set(NETDISPLAY_STATIC_CLIENT_PREFIX "" CACHE PATH
-    "Optional prefix containing static libavcodec.a, libavutil.a and libdrm.a")
+    "Optional prefix containing static libavcodec.a, libavutil.a, libswscale.a and libdrm.a")
 
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -31,7 +31,7 @@ target_link_libraries(nd_common PUBLIC nd_flags Threads::Threads PkgConfig::SODI
 
 if(NETDISPLAY_BUILD_SERVER)
     pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
-    pkg_check_modules(SERVER_FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil)
+    pkg_check_modules(SERVER_FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
     find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
     set(SC_XML "${CMAKE_CURRENT_SOURCE_DIR}/protocols/wlr-screencopy-unstable-v1.xml")
     set(OP_XML "${CMAKE_CURRENT_SOURCE_DIR}/protocols/wlr-output-power-management-unstable-v1.xml")
@@ -96,17 +96,21 @@ if(NETDISPLAY_BUILD_CLIENT)
             PATHS "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib"
                   "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib64"
             NO_DEFAULT_PATH REQUIRED)
+        find_file(ND_SWSCALE_A libswscale.a
+            PATHS "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib"
+                  "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib64"
+            NO_DEFAULT_PATH REQUIRED)
         find_file(ND_DRM_A libdrm.a
             PATHS "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib"
                   "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib64"
             NO_DEFAULT_PATH REQUIRED)
         target_include_directories(netdisplay-client PRIVATE "${ND_AV_INCLUDE}" "${ND_DRM_INCLUDE}")
         target_link_libraries(netdisplay-client PRIVATE
-            "${ND_AVCODEC_A}" "${ND_AVUTIL_A}" "${ND_DRM_A}"
+            "${ND_AVCODEC_A}" "${ND_AVUTIL_A}" "${ND_SWSCALE_A}" "${ND_DRM_A}"
             PkgConfig::LIBVA m dl rt)
     else()
         # Used by the source fallback on an arbitrary receiver laptop.
-        pkg_check_modules(CLIENT REQUIRED IMPORTED_TARGET libdrm libavcodec libavutil)
+        pkg_check_modules(CLIENT REQUIRED IMPORTED_TARGET libdrm libavcodec libavutil libswscale)
         target_link_libraries(netdisplay-client PRIVATE PkgConfig::CLIENT PkgConfig::LIBVA)
     endif()
 endif()

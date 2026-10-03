@@ -22,9 +22,12 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
+#include <libswscale/swscale.h>
 
 #include "common.h"
 #include "crypto.h"
@@ -55,8 +58,16 @@ static uint8_t *flip_map;
 
 static AVCodecContext *enc;
 static AVFrame *enc_frame;
+static AVFrame *convert_frame;
 static AVPacket *enc_pkt;
-static int enc_input_format = AV_PIX_FMT_NONE;
+static AVBufferRef *enc_hw_device;
+static AVBufferRef *enc_hw_frames;
+static int encoder_uses_hw_frames;
+static enum AVPixelFormat capture_format = AV_PIX_FMT_NONE;
+static enum AVPixelFormat encoder_sw_format = AV_PIX_FMT_NONE;
+static struct SwsContext *sws;
+static char selected_encoder[64];
+static uint16_t selected_codec;
 static uint64_t frame_pts;
 
 static int udp_fd = -1;
@@ -284,77 +295,373 @@ static void alloc_capture_buffer(uint32_t format, uint32_t width,
 
   /* Wayland XRGB8888/ARGB8888 are native-endian 32-bit words. These FFmpeg
    * aliases describe exactly 0x00RRGGBB / 0xAARRGGBB native-endian memory. */
-  enc_input_format =
+  capture_format =
       (format == WL_SHM_FORMAT_XRGB8888) ? AV_PIX_FMT_0RGB32 : AV_PIX_FMT_RGB32;
 }
 
+static const char *codec_wire_name(uint16_t codec) {
+  switch (codec) {
+  case NDC_VIDEO_AV1:
+    return "AV1";
+  case NDC_VIDEO_HEVC:
+    return "HEVC";
+  case NDC_VIDEO_H264:
+    return "H.264";
+  default:
+    return "unknown";
+  }
+}
+
+static uint32_t codec_wire_bit(uint16_t codec) {
+  switch (codec) {
+  case NDC_VIDEO_AV1:
+    return NDC_CODEC_AV1;
+  case NDC_VIDEO_HEVC:
+    return NDC_CODEC_HEVC;
+  case NDC_VIDEO_H264:
+    return NDC_CODEC_H264;
+  default:
+    return 0;
+  }
+}
+
+struct encoder_candidate {
+  uint16_t codec;
+  const char *name;
+  enum AVHWDeviceType hw_type;
+};
+
+/* Codec order is negotiated separately. Within one codec, prefer native GPU
+ * backends that are common on Linux. The common pipeline supports both
+ * software-frame hardware encoders (NVENC/QSV/AMF) and hardware-frame-only
+ * encoders (notably VAAPI). */
+static const struct encoder_candidate encoder_candidates[] = {
+    {NDC_VIDEO_AV1, "av1_nvenc", AV_HWDEVICE_TYPE_CUDA},
+    {NDC_VIDEO_AV1, "av1_qsv", AV_HWDEVICE_TYPE_QSV},
+    {NDC_VIDEO_AV1, "av1_amf", AV_HWDEVICE_TYPE_NONE},
+    {NDC_VIDEO_AV1, "av1_vaapi", AV_HWDEVICE_TYPE_VAAPI},
+    {NDC_VIDEO_HEVC, "hevc_nvenc", AV_HWDEVICE_TYPE_CUDA},
+    {NDC_VIDEO_HEVC, "hevc_qsv", AV_HWDEVICE_TYPE_QSV},
+    {NDC_VIDEO_HEVC, "hevc_amf", AV_HWDEVICE_TYPE_NONE},
+    {NDC_VIDEO_HEVC, "hevc_vaapi", AV_HWDEVICE_TYPE_VAAPI},
+    {NDC_VIDEO_H264, "h264_nvenc", AV_HWDEVICE_TYPE_CUDA},
+    {NDC_VIDEO_H264, "h264_qsv", AV_HWDEVICE_TYPE_QSV},
+    {NDC_VIDEO_H264, "h264_amf", AV_HWDEVICE_TYPE_NONE},
+    {NDC_VIDEO_H264, "h264_vaapi", AV_HWDEVICE_TYPE_VAAPI},
+};
+
+static const struct encoder_candidate *
+find_encoder_candidate(const char *name) {
+  for (size_t i = 0;
+       i < sizeof(encoder_candidates) / sizeof(encoder_candidates[0]); i++)
+    if (!strcmp(encoder_candidates[i].name, name))
+      return &encoder_candidates[i];
+  return NULL;
+}
+
+static const enum AVPixelFormat *codec_pix_fmts(const AVCodec *codec) {
+  const void *list = NULL;
+  if (!codec ||
+      avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0,
+                                   &list, NULL) < 0)
+    return NULL;
+  return (const enum AVPixelFormat *)list;
+}
+
+static int codec_accepts_pix_fmt(const AVCodec *codec, enum AVPixelFormat fmt);
+
+static enum AVPixelFormat choose_software_pix_fmt(
+    const AVCodec *codec, enum AVPixelFormat preferred) {
+  if (preferred != AV_PIX_FMT_NONE &&
+      codec_accepts_pix_fmt(codec, preferred)) {
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(preferred);
+    if (d && !(d->flags & AV_PIX_FMT_FLAG_HWACCEL))
+      return preferred;
+  }
+  const enum AVPixelFormat *fmts = codec_pix_fmts(codec);
+  if (!fmts)
+    return AV_PIX_FMT_NONE;
+  for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++) {
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(*p);
+    if (!d || (d->flags & AV_PIX_FMT_FLAG_HWACCEL))
+      continue;
+    if (sws_isSupportedOutput(*p))
+      return *p;
+  }
+  return AV_PIX_FMT_NONE;
+}
+
+static enum AVPixelFormat hw_format_for_type(enum AVHWDeviceType type) {
+  switch (type) {
+  case AV_HWDEVICE_TYPE_VAAPI:
+    return AV_PIX_FMT_VAAPI;
+  case AV_HWDEVICE_TYPE_QSV:
+    return AV_PIX_FMT_QSV;
+  case AV_HWDEVICE_TYPE_CUDA:
+    return AV_PIX_FMT_CUDA;
+  default:
+    return AV_PIX_FMT_NONE;
+  }
+}
+
+static int codec_accepts_pix_fmt(const AVCodec *codec, enum AVPixelFormat fmt) {
+  const enum AVPixelFormat *fmts = codec_pix_fmts(codec);
+  if (!fmts)
+    return 1;
+  for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++)
+    if (*p == fmt)
+      return 1;
+  return 0;
+}
+
+static enum AVPixelFormat choose_transfer_pix_fmt(AVBufferRef *device) {
+  AVHWFramesConstraints *constraints =
+      av_hwdevice_get_hwframe_constraints(device, NULL);
+  if (!constraints)
+    return AV_PIX_FMT_NONE;
+  enum AVPixelFormat chosen = AV_PIX_FMT_NONE;
+  if (constraints->valid_sw_formats) {
+    for (const enum AVPixelFormat *p = constraints->valid_sw_formats;
+         *p != AV_PIX_FMT_NONE; p++) {
+      const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(*p);
+      if (d && !(d->flags & AV_PIX_FMT_FLAG_HWACCEL) &&
+          sws_isSupportedOutput(*p)) {
+        chosen = *p;
+        break;
+      }
+    }
+  }
+  av_hwframe_constraints_free(&constraints);
+  return chosen;
+}
+
+static void configure_encoder_context(AVCodecContext *c, enum AVPixelFormat fmt,
+                                      int width, int height, int fps) {
+  c->width = width;
+  c->height = height;
+  c->time_base = (AVRational){1, fps};
+  c->framerate = (AVRational){fps, 1};
+  c->pix_fmt = fmt;
+  /* Some NVENC generations reject GOP=1 even with B-frames disabled.
+   * Every submitted frame is still explicitly marked I below, so a GOP size
+   * of 2 satisfies those drivers without introducing inter-frame dependency. */
+  c->gop_size = 2;
+  c->max_b_frames = 0;
+  c->refs = 1;
+  c->color_range = AVCOL_RANGE_MPEG;
+  c->color_primaries = AVCOL_PRI_BT709;
+  c->color_trc = AVCOL_TRC_BT709;
+  c->colorspace = AVCOL_SPC_BT709;
+  c->flags |= AV_CODEC_FLAG_LOW_DELAY;
+}
+
+static void encoder_open_options(const char *encoder_name, int qp_value,
+                                 AVDictionary **opts) {
+  char qps[16];
+  snprintf(qps, sizeof(qps), "%d", qp_value);
+  if (strstr(encoder_name, "_nvenc")) {
+    av_dict_set(opts, "preset", "p1", 0);
+    av_dict_set(opts, "tune", "ull", 0);
+    av_dict_set(opts, "rc", "constqp", 0);
+    av_dict_set(opts, "qp", qps, 0);
+    av_dict_set(opts, "zerolatency", "1", 0);
+    av_dict_set(opts, "forced-idr", "1", 0);
+    av_dict_set(opts, "delay", "0", 0);
+    av_dict_set(opts, "rc-lookahead", "0", 0);
+    av_dict_set(opts, "rgb_mode", "yuv420", 0);
+    if (!strstr(encoder_name, "av1_"))
+      av_dict_set(opts, "aud", "1", 0);
+  } else if (strstr(encoder_name, "_qsv")) {
+    av_dict_set(opts, "preset", "veryfast", 0);
+    av_dict_set(opts, "global_quality", qps, 0);
+    av_dict_set(opts, "look_ahead", "0", 0);
+  } else if (strstr(encoder_name, "_amf")) {
+    av_dict_set(opts, "usage", "ultralowlatency", 0);
+    av_dict_set(opts, "quality", "speed", 0);
+  }
+}
+
+static int setup_encoder_input(AVCodecContext *ctx, const AVCodec *codec,
+                               const struct encoder_candidate *candidate,
+                               int width, int height, int fps,
+                               enum AVPixelFormat preferred_sw_format,
+                               AVBufferRef **device_out,
+                               AVBufferRef **frames_out,
+                               enum AVPixelFormat *sw_format_out) {
+  enum AVPixelFormat sw_format =
+      choose_software_pix_fmt(codec, preferred_sw_format);
+  if (sw_format != AV_PIX_FMT_NONE) {
+    configure_encoder_context(ctx, sw_format, width, height, fps);
+    *sw_format_out = sw_format;
+    return 0;
+  }
+
+  if (!candidate || candidate->hw_type == AV_HWDEVICE_TYPE_NONE)
+    return -1;
+  enum AVPixelFormat hw_format = hw_format_for_type(candidate->hw_type);
+  if (hw_format == AV_PIX_FMT_NONE || !codec_accepts_pix_fmt(codec, hw_format))
+    return -1;
+
+  AVBufferRef *device = NULL;
+  if (av_hwdevice_ctx_create(&device, candidate->hw_type, NULL, NULL, 0) < 0)
+    return -1;
+  sw_format = choose_transfer_pix_fmt(device);
+  if (sw_format == AV_PIX_FMT_NONE) {
+    av_buffer_unref(&device);
+    return -1;
+  }
+
+  AVBufferRef *frames = av_hwframe_ctx_alloc(device);
+  if (!frames) {
+    av_buffer_unref(&device);
+    return -1;
+  }
+  AVHWFramesContext *frames_ctx = (AVHWFramesContext *)frames->data;
+  frames_ctx->format = hw_format;
+  frames_ctx->sw_format = sw_format;
+  frames_ctx->width = width;
+  frames_ctx->height = height;
+  frames_ctx->initial_pool_size = 4;
+  if (av_hwframe_ctx_init(frames) < 0) {
+    av_buffer_unref(&frames);
+    av_buffer_unref(&device);
+    return -1;
+  }
+
+  configure_encoder_context(ctx, hw_format, width, height, fps);
+  ctx->hw_frames_ctx = av_buffer_ref(frames);
+  if (!ctx->hw_frames_ctx) {
+    av_buffer_unref(&frames);
+    av_buffer_unref(&device);
+    return -1;
+  }
+  *device_out = device;
+  *frames_out = frames;
+  *sw_format_out = sw_format;
+  return 0;
+}
+
+static int probe_encoder_candidate(const struct encoder_candidate *candidate,
+                                   int width, int height, int fps, int qp_value) {
+  const AVCodec *codec = avcodec_find_encoder_by_name(candidate->name);
+  if (!codec)
+    return 0;
+  AVCodecContext *ctx = avcodec_alloc_context3(codec);
+  if (!ctx)
+    return 0;
+  /* Capability probes are expected to fail often. Keep libavcodec's expected
+   * backend errors out of the daemon log and use the same low-latency options
+   * as the real stream so probe/runtime cannot disagree on encoder setup. */
+  ctx->log_level_offset = 128;
+  AVBufferRef *device = NULL, *frames = NULL;
+  enum AVPixelFormat sw_format = AV_PIX_FMT_NONE;
+  int ret = setup_encoder_input(ctx, codec, candidate, width, height, fps,
+                                AV_PIX_FMT_NONE, &device, &frames, &sw_format);
+  AVDictionary *opts = NULL;
+  if (ret == 0) {
+    encoder_open_options(candidate->name, qp_value, &opts);
+    ret = avcodec_open2(ctx, codec, &opts);
+  }
+  av_dict_free(&opts);
+  avcodec_free_context(&ctx);
+  av_buffer_unref(&frames);
+  av_buffer_unref(&device);
+  return ret >= 0;
+}
+
+int nd_video_choose_encoder(uint16_t codec, int width, int height, int fps,
+                            int qp_value, char *name, size_t name_size) {
+  if (!codec_wire_bit(codec) || !name || !name_size)
+    return -1;
+  for (size_t i = 0;
+       i < sizeof(encoder_candidates) / sizeof(encoder_candidates[0]); i++) {
+    if (encoder_candidates[i].codec != codec)
+      continue;
+    if (probe_encoder_candidate(&encoder_candidates[i], width, height, fps,
+                                qp_value)) {
+      snprintf(name, name_size, "%s", encoder_candidates[i].name);
+      return 0;
+    }
+  }
+  return -1;
+}
+
 static void init_encoder(void) {
-  const AVCodec *codec = avcodec_find_encoder_by_name("h264_nvenc");
-  if (!codec) {
-    fprintf(stderr, "h264_nvenc not present in libavcodec\n");
+  const AVCodec *codec = avcodec_find_encoder_by_name(selected_encoder);
+  const struct encoder_candidate *candidate =
+      find_encoder_candidate(selected_encoder);
+  if (!codec || !candidate) {
+    fprintf(stderr, "hardware encoder '%s' disappeared\n", selected_encoder);
     exit(EXIT_FAILURE);
   }
 
   enc = avcodec_alloc_context3(codec);
   if (!enc)
     die("avcodec_alloc_context3");
-
-  enc->width = (int)stream_width;
-  enc->height = (int)stream_height;
-  enc->time_base = (AVRational){1, (int)stream_fps};
-  enc->framerate = (AVRational){(int)stream_fps, 1};
-  enc->pix_fmt = enc_input_format;
-  enc->gop_size = 1;
-  enc->max_b_frames = 0;
-  enc->refs = 1;
-  enc->color_range = AVCOL_RANGE_MPEG;
-  enc->color_primaries = AVCOL_PRI_BT709;
-  enc->color_trc = AVCOL_TRC_BT709;
-  enc->colorspace = AVCOL_SPC_BT709;
-  enc->flags |= AV_CODEC_FLAG_LOW_DELAY;
+  if (setup_encoder_input(enc, codec, candidate, (int)stream_width,
+                          (int)stream_height, (int)stream_fps, capture_format,
+                          &enc_hw_device, &enc_hw_frames,
+                          &encoder_sw_format) < 0) {
+    fprintf(stderr, "cannot configure input for hardware encoder '%s'\n",
+            selected_encoder);
+    exit(EXIT_FAILURE);
+  }
+  encoder_uses_hw_frames = enc_hw_frames != NULL;
 
   AVDictionary *opts = NULL;
-  av_dict_set(&opts, "preset", "p1", 0);
-  av_dict_set(&opts, "tune", "ull", 0);
-  av_dict_set(&opts, "rc", "constqp", 0);
-  char qps[16];
-  snprintf(qps, sizeof(qps), "%d", qp);
-  av_dict_set(&opts, "qp", qps, 0);
-  av_dict_set(&opts, "zerolatency", "1", 0);
-  av_dict_set(&opts, "forced-idr", "1", 0);
-  av_dict_set(&opts, "delay", "0", 0);
-  av_dict_set(&opts, "rc-lookahead", "0", 0);
-  av_dict_set(&opts, "rgb_mode", "yuv420", 0);
-  av_dict_set(&opts, "aud", "1", 0);
+  encoder_open_options(selected_encoder, qp, &opts);
 
   int ret = avcodec_open2(enc, codec, &opts);
   if (ret < 0)
-    ff_die("avcodec_open2(h264_nvenc)", ret);
+    ff_die("avcodec_open2(hardware encoder)", ret);
   if (opts) {
     AVDictionaryEntry *e = NULL;
     while ((e = av_dict_get(opts, "", e, AV_DICT_IGNORE_SUFFIX)))
-      fprintf(stderr, "warning: unused NVENC option %s=%s\n", e->key, e->value);
+      fprintf(stderr, "warning: unused %s option %s=%s\n", selected_encoder,
+              e->key, e->value);
     av_dict_free(&opts);
   }
 
-  enc_frame = av_frame_alloc();
+  convert_frame = av_frame_alloc();
   enc_pkt = av_packet_alloc();
-  if (!enc_frame || !enc_pkt)
+  if (!convert_frame || !enc_pkt)
     die("av_frame/packet_alloc");
-  enc_frame->format = enc->pix_fmt;
-  enc_frame->width = enc->width;
-  enc_frame->height = enc->height;
-  enc_frame->color_range = enc->color_range;
-  enc_frame->color_primaries = enc->color_primaries;
-  enc_frame->color_trc = enc->color_trc;
-  enc_frame->colorspace = enc->colorspace;
+  convert_frame->format = encoder_sw_format;
+  convert_frame->width = enc->width;
+  convert_frame->height = enc->height;
+  convert_frame->color_range = enc->color_range;
+  convert_frame->color_primaries = enc->color_primaries;
+  convert_frame->color_trc = enc->color_trc;
+  convert_frame->colorspace = enc->colorspace;
+  if (av_frame_get_buffer(convert_frame, 32) < 0)
+    die("av_frame_get_buffer");
 
-  fprintf(stderr,
-          "NVENC h264 all-IDR: %ux%u@%u QP=%d input=%s; SPS/PPS are repeated "
-          "on IDR because global-header is off\n",
-          stream_width, stream_height, stream_fps, qp,
-          av_get_pix_fmt_name(enc->pix_fmt) ? av_get_pix_fmt_name(enc->pix_fmt)
-                                            : "?");
+  if (encoder_uses_hw_frames) {
+    enc_frame = av_frame_alloc();
+    if (!enc_frame || av_hwframe_get_buffer(enc_hw_frames, enc_frame, 0) < 0)
+      die("av_hwframe_get_buffer");
+  } else {
+    enc_frame = convert_frame;
+  }
+
+  sws = sws_getContext(enc->width, enc->height, capture_format, enc->width,
+                       enc->height, encoder_sw_format, SWS_FAST_BILINEAR, NULL,
+                       NULL, NULL);
+  if (!sws)
+    die("sws_getContext");
+
+  fprintf(
+      stderr,
+      "%s via %s: %ux%u@%u QP=%d transfer=%s encoder=%s capture=%s all-intra\n",
+      codec_wire_name(selected_codec), selected_encoder, stream_width,
+      stream_height, stream_fps, qp,
+      av_get_pix_fmt_name(encoder_sw_format)
+          ? av_get_pix_fmt_name(encoder_sw_format)
+          : "?",
+      av_get_pix_fmt_name(enc->pix_fmt) ? av_get_pix_fmt_name(enc->pix_fmt)
+                                        : "?",
+      av_get_pix_fmt_name(capture_format) ? av_get_pix_fmt_name(capture_format)
+                                          : "?");
 }
 
 static int tx_has_newer(void) {
@@ -365,7 +672,7 @@ static int tx_has_newer(void) {
   return ready;
 }
 
-/* Send one encoded IDR.  The socket is used nonblocking here so the TX
+/* Send one encoded intra frame.  The socket is used nonblocking here so the TX
  * thread can notice a newer complete frame and abandon this one rather than
  * ever building video latency.  Return 0=complete, 1=aborted for newer,
  * -1=send error. */
@@ -386,7 +693,8 @@ static int send_encoded_frame(const uint8_t *data, size_t size, uint32_t seq) {
   atomic_fetch_add(&stat_tx_bytes, stats.bytes);
   atomic_fetch_add(&stat_eagain, stats.eagain);
   atomic_fetch_add(&stat_tx_errors, stats.errors);
-  if (!rc) atomic_fetch_add(&stat_tx_frames, 1);
+  if (!rc)
+    atomic_fetch_add(&stat_tx_frames, 1);
   return rc;
 }
 
@@ -510,63 +818,53 @@ static int encode_and_publish(int y_invert) {
     src = flip_map;
   }
 
-  enc_frame->data[0] = src;
-  enc_frame->linesize[0] = linesize;
-  enc_frame->pts = (int64_t)frame_pts++;
-  enc_frame->pict_type = AV_PICTURE_TYPE_I;
+  if (av_frame_make_writable(convert_frame) < 0)
+    return -1;
+  const uint8_t *src_data[4] = {src, NULL, NULL, NULL};
+  int src_linesize[4] = {linesize, 0, 0, 0};
+  if (sws_scale(sws, src_data, src_linesize, 0, (int)stream_height,
+                convert_frame->data, convert_frame->linesize) <= 0)
+    return -1;
+  convert_frame->pts = (int64_t)frame_pts++;
+  convert_frame->pict_type = AV_PICTURE_TYPE_I;
 
-  int ret = avcodec_send_frame(enc, enc_frame);
+  int ret;
+  if (encoder_uses_hw_frames) {
+    if (av_frame_make_writable(enc_frame) < 0 ||
+        av_hwframe_transfer_data(enc_frame, convert_frame, 0) < 0 ||
+        av_frame_copy_props(enc_frame, convert_frame) < 0)
+      return -1;
+  }
+  ret = avcodec_send_frame(enc, enc_frame);
   if (ret < 0) {
-    fprintf(stderr, "NVENC send failed: ");
     char b[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(ret, b, sizeof(b));
-    fprintf(stderr, "%s\n", b);
+    fprintf(stderr, "%s send failed: %s\n", selected_encoder, b);
     return -1;
   }
 
-  ret = avcodec_receive_packet(enc, enc_pkt);
-  if (ret == AVERROR(EAGAIN)) {
-    fprintf(stderr,
-            "NVENC returned no packet despite delay=0; frame dropped\n");
-    return -1;
-  }
-  if (ret < 0)
-    ff_die("avcodec_receive_packet", ret);
-
-  if (frame_encrypted && seq_id == UINT32_MAX) {
-    fprintf(stderr, "encrypted frame counter exhausted; restarting stream\n");
-    exit(EXIT_SUCCESS);
-  }
-  stat_encoded++;
-  uint32_t seq = ++seq_id;
-  if ((size_t)enc_pkt->size > ND_MAX_FRAME) {
-    atomic_fetch_add_explicit(&stat_oversize, 1, memory_order_relaxed);
-    av_packet_unref(enc_pkt);
-    return -1;
-  }
-
-  /* Move the refcounted NVENC packet into the one-slot TX handoff.  No
-   * encoded-frame memcpy and no network work on the Wayland thread. */
-  publish_encoded_packet(enc_pkt, seq);
-
-  /* With zero-delay all-IDR NVENC there should be exactly one output packet
-   * per submitted frame. If there is another one, draining it here would
-   * incorrectly assign a second wire frame to the same capture. */
-  ret = avcodec_receive_packet(enc, enc_pkt);
-  if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
-    if (ret >= 0) {
-      fprintf(
-          stderr,
-          "warning: unexpected extra NVENC packet (%d bytes), dropping it\n",
-          enc_pkt->size);
-      av_packet_unref(enc_pkt);
-    } else {
-      char b[AV_ERROR_MAX_STRING_SIZE];
-      av_strerror(ret, b, sizeof(b));
-      fprintf(stderr, "warning: NVENC drain: %s\n", b);
+  int produced = 0;
+  for (;;) {
+    ret = avcodec_receive_packet(enc, enc_pkt);
+    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+      break;
+    if (ret < 0)
+      ff_die("avcodec_receive_packet", ret);
+    produced = 1;
+    if (frame_encrypted && seq_id == UINT32_MAX) {
+      fprintf(stderr, "encrypted frame counter exhausted; restarting stream\n");
+      exit(EXIT_SUCCESS);
     }
+    stat_encoded++;
+    uint32_t seq = ++seq_id;
+    if ((size_t)enc_pkt->size > ND_MAX_FRAME) {
+      atomic_fetch_add_explicit(&stat_oversize, 1, memory_order_relaxed);
+      av_packet_unref(enc_pkt);
+      continue;
+    }
+    publish_encoded_packet(enc_pkt, seq);
   }
-  return 0;
+  return produced ? 0 : 1;
 }
 
 static void request_frame(void);
@@ -601,8 +899,8 @@ static void frame_ready(void *data, struct zwlr_screencopy_frame_v1 *frame,
   (void)encode_and_publish(frame_y_invert);
 
   /* UDP runs independently.  Request the next compositor frame as soon as
-   * NVENC has produced this one; Ethernet serialization is no longer in the
-   * 60 Hz capture critical path. */
+   * the encoder has accepted this one; Ethernet serialization is no longer in
+   * the 60 Hz capture critical path. */
   request_frame();
   print_stats();
 }
@@ -695,15 +993,19 @@ static void request_frame(void) {
 
 int nd_video_sender_run(const char *output_name, const char *ip, int port,
                         int qp_value, int width, int height, int refresh_hz,
-                        uint64_t wire_session, int encrypted, int key_fd) {
+                        uint64_t wire_session, int encrypted, int key_fd,
+                        uint16_t video_codec, const char *encoder_name) {
   if (!output_name || !*output_name || !ip || !*ip || port <= 0 ||
       port > 65535 || qp_value < 0 || qp_value > 51 || width <= 0 ||
       width > UINT16_MAX || (width & 1) || height <= 0 || height > UINT16_MAX ||
-      (height & 1) || refresh_hz <= 0 || refresh_hz > UINT16_MAX) {
+      (height & 1) || refresh_hz <= 0 || refresh_hz > UINT16_MAX ||
+      !codec_wire_bit(video_codec) || !encoder_name || !*encoder_name) {
     fprintf(stderr, "invalid built-in video sender parameters\n");
     return 2;
   }
   qp = qp_value;
+  selected_codec = video_codec;
+  snprintf(selected_encoder, sizeof(selected_encoder), "%s", encoder_name);
   stream_width = (uint32_t)width;
   stream_height = (uint32_t)height;
   stream_fps = (uint32_t)refresh_hz;
@@ -747,11 +1049,13 @@ int nd_video_sender_run(const char *output_name, const char *ip, int port,
     return 1;
   }
 
-  fprintf(stderr,
-          "stream %ux%u@%u all-IDR H.264: output=%s -> %s:%d session=%016llx "
-          "encryption=%s\n",
-          stream_width, stream_height, stream_fps, output_name, ip, port,
-          (unsigned long long)session_id, frame_encrypted ? "on" : "off");
+  fprintf(
+      stderr,
+      "stream %ux%u@%u codec=%s encoder=%s: output=%s -> %s:%d session=%016llx "
+      "encryption=%s\n",
+      stream_width, stream_height, stream_fps, codec_wire_name(selected_codec),
+      selected_encoder, output_name, ip, port, (unsigned long long)session_id,
+      frame_encrypted ? "on" : "off");
 
   request_frame();
   while (wl_display_dispatch(display) >= 0) {

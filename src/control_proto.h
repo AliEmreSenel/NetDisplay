@@ -6,7 +6,7 @@
 
 #define NDC_MAGIC 0x4e444333u      /* NDC3 */
 #define NDC_DISC_MAGIC 0x4e444344u /* NDCD */
-#define NDC_VERSION 5u
+#define NDC_VERSION 6u
 #define NDC_DEFAULT_PORT 5001u
 #define NDC_DEFAULT_VIDEO_PORT 5000u
 #define NDC_MAX_PAYLOAD 512u
@@ -24,6 +24,17 @@
 #define NDC_FLAG_POWER_INFO (1u << 5)
 /* Compatibility name for protocol-v5 implementations predating passwords. */
 #define NDC_FLAG_HAVE_PSK NDC_FLAG_AUTH_REQUIRED
+
+#define NDC_CODEC_H264 (1u << 0)
+#define NDC_CODEC_HEVC (1u << 1)
+#define NDC_CODEC_AV1  (1u << 2)
+#define NDC_CODEC_ALL  (NDC_CODEC_H264 | NDC_CODEC_HEVC | NDC_CODEC_AV1)
+
+enum ndc_video_codec {
+  NDC_VIDEO_H264 = 1,
+  NDC_VIDEO_HEVC = 2,
+  NDC_VIDEO_AV1 = 3,
+};
 
 #define NDC_DISPLAY_HAS_DPMS (1u << 0)
 #define NDC_DISPLAY_HAS_BRIGHTNESS (1u << 1)
@@ -75,6 +86,7 @@ struct __attribute__((packed)) ndc_hello {
   uint32_t flags;
   uint16_t display_count;
   uint16_t reserved;
+  uint32_t video_codecs; /* NDC_CODEC_* hardware-decode capabilities */
   uint8_t nonce[NDC_NONCE_SIZE];
 };
 
@@ -115,7 +127,7 @@ struct __attribute__((packed)) ndc_stream_ready {
 struct __attribute__((packed)) ndc_welcome {
   uint32_t flags;
   uint16_t display_count;
-  uint16_t reserved;
+  uint16_t video_codec; /* enum ndc_video_codec */
 };
 
 struct __attribute__((packed)) ndc_input {

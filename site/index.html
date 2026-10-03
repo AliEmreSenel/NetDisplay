@@ -69,9 +69,9 @@ check_build_deps() {
     done
     if [ "$MODE" = server ]; then
         command -v wayland-scanner >/dev/null 2>&1 || MISSING="$MISSING wayland-scanner"
-        PCS="wayland-client libavcodec libavutil libsodium"
+        PCS="wayland-client libavcodec libavutil libswscale libsodium"
     else
-        PCS="libdrm libavcodec libavutil libva libva-drm libsodium"
+        PCS="libdrm libavcodec libavutil libswscale libva libva-drm libsodium"
     fi
     if command -v pkg-config >/dev/null 2>&1; then
         for dep in $PCS; do
@@ -105,10 +105,10 @@ install_build_deps() {
         if [ "$MODE" = server ]; then
             run_as_root apt-get install -y build-essential cmake pkg-config tar \
                 libwayland-dev libwayland-bin libavcodec-dev \
-                libavutil-dev libsodium-dev
+                libavutil-dev libswscale-dev libsodium-dev
         else
             run_as_root apt-get install -y build-essential cmake pkg-config tar \
-                libdrm-dev libavcodec-dev libavutil-dev libva-dev libsodium-dev
+                libdrm-dev libavcodec-dev libavutil-dev libswscale-dev libva-dev libsodium-dev
         fi
     elif command -v dnf >/dev/null 2>&1; then
         if [ "$MODE" = server ]; then
