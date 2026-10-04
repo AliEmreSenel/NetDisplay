@@ -11,6 +11,8 @@ struct DiagnosticSnapshot {
     var lastVideoNS: UInt64 = 0, motionHz = 0.0
     var hardwareDecoder = false
     var head = Quaternion()
+    var position = Vec3(), positionValid = false
+    var trackingStatus = "Not tracking"
     var lastError = ""
 }
 final class Diagnostics {

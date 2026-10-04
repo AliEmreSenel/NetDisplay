@@ -134,7 +134,9 @@ jobs:
       - name: Install dependencies and pinned OpenVR headers
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential cmake pkg-config libsodium-dev
+          sudo apt-get install --no-install-recommends -y build-essential cmake pkg-config libsodium-dev \
+            libavcodec-dev libavutil-dev libswscale-dev libvulkan-dev libdrm-dev \
+            libx11-dev libxrandr-dev python3
           git clone https://github.com/ValveSoftware/openvr.git "$RUNNER_TEMP/openvr"
           git -C "$RUNNER_TEMP/openvr" checkout 0924064316de3effbcd1acf1e309182a2deb1c05
       - name: Build and test driver
@@ -143,3 +145,9 @@ jobs:
             -DOPENVR_INCLUDE_DIR="$RUNNER_TEMP/openvr/headers"
           cmake --build build-steamvr --parallel 2
           ctest --test-dir build-steamvr --output-on-failure
+      - name: Build dedicated VR backend, capture layer and runtime diagnostics
+        run: |
+          cmake -S vr -B build-vr -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DOPENVR_INCLUDE_DIR="$RUNNER_TEMP/openvr/headers"
+          cmake --build build-vr --parallel 2
+          ctest --test-dir build-vr --output-on-failure

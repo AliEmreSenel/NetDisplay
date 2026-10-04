@@ -1,3 +1,5 @@
+> Dedicated VR setup, tracking and new latency diagnostics: see [VR-TRACKING-FIX.md](../../VR-TRACKING-FIX.md).
+
 # Troubleshooting
 
 ## GitHub does not show the workflow

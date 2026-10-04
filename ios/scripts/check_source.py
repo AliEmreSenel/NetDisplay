@@ -19,7 +19,7 @@ assert 'CODE_SIGNING_ALLOWED' in text
 ET.parse(root/'NetDisplay.xcodeproj'/'xcshareddata'/'xcschemes'/'NetDisplay.xcscheme')
 info=plistlib.loads((root/'App'/'Info.plist').read_bytes())
 assert info['NSLocalNetworkUsageDescription'] and info['NSMotionUsageDescription']
-assert 'NSCameraUsageDescription' not in info, 'Camera is intentionally not part of this milestone'
+assert info['NSCameraUsageDescription'], 'Optional AR tracking needs camera permission'
 assert len(info['UISupportedInterfaceOrientations'])==2
 privacy=plistlib.loads((root/'App'/'PrivacyInfo.xcprivacy').read_bytes())
 assert privacy['NSPrivacyTracking'] is False

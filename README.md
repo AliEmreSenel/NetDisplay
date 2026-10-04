@@ -1,11 +1,13 @@
 # NetDisplay
 
+For the native iOS receiver and dedicated SteamVR backend, see [VR tracking and latency fixes](VR-TRACKING-FIX.md).
+
 I built NetDisplay to use another Linux computer as a low-latency network
 display for my Hyprland desktop. One source can drive multiple receivers, and
 each receiver can expose multiple physical displays. Video, input, DPMS,
 brightness, batteries, and chargers can all be forwarded.
 
-NetDisplay is Linux-only. The source currently requires Hyprland and a supported
+The original desktop server/client are Linux-specific. The desktop source requires Hyprland and a supported
 FFmpeg hardware encoder; the receiver uses DRM/KMS and VAAPI and normally runs
 from a dedicated VT. Video is negotiated per session in AV1 -> HEVC/H.265 ->
 H.264 order, using only codecs both endpoints advertise as hardware-capable.

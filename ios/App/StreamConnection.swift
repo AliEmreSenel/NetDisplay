@@ -98,7 +98,7 @@ final class StreamConnection {
             let (width, height) = settings.dimensions
             try SocketIO.sendMessage(fd, ControlMessage(.display,
                 Wire.display(width: width, height: height, fps: UInt16(settings.fps))))
-            status("Negotiating video / creating Hyprland output")
+            status(settings.viewerPurpose == .vr ? "Negotiating VR video" : "Negotiating video / creating Hyprland output")
             let welcome = try SocketIO.readMessage(fd); try welcome.require(.welcome, size: 8)
             var wr = ByteReader(welcome.payload)
             let selectedFlags = try wr.u32(), count = try wr.u16(), codec = try wr.u16()

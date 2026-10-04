@@ -1,0 +1,240 @@
+{
+  "baseline_archive": "NetDisplay-upload.tar(1).gz",
+  "baseline_sha256": "825c3b2f624de1db690e2d8808a19f25cb07d5bf4c560314f1655723ea2f2f9f",
+  "kind": "source patch; platform builds and hardware integration unverified",
+  "changed_files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "status": "modified",
+      "sha256": "5a731e95b39739f71fd9a725768700d85abf9d7cb0af16b692ca381ff7a830b8"
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "sha256": "b9794b5f89c5574c7b687ba4572e23cc16ce713bec5026eb010dedf1c175303a"
+    },
+    {
+      "path": "VR-PORTABLE-TEST-LOG.txt",
+      "status": "added",
+      "sha256": "43cfbcf6184a89663804d27c6ddbb1d6f6821f7c27be57bc0deb6d1b67f2e328"
+    },
+    {
+      "path": "VR-TRACKING-FIX.md",
+      "status": "added",
+      "sha256": "691c85d82e561fa812e70bef73dee10ba770d8b8ddc4b6975c02e476ad6c9809"
+    },
+    {
+      "path": "VR-VALIDATION.md",
+      "status": "added",
+      "sha256": "cd017b7a9c31003b55142ec92081633ffb5f6aa1c37e816e7a9a3bbb791efe5b"
+    },
+    {
+      "path": "ios/App/AppModel.swift",
+      "status": "modified",
+      "sha256": "4552f4056aece5b48279467c5a4bfe454a1225bc129c7761280406b178e4a69b"
+    },
+    {
+      "path": "ios/App/Diagnostics.swift",
+      "status": "modified",
+      "sha256": "124c9b76dd3457aee61f124ee987f445e6831ac211ae9891754365068c644ec0"
+    },
+    {
+      "path": "ios/App/Info.plist",
+      "status": "modified",
+      "sha256": "a92a07581047e92d3fad97b490ea0865b6dde0b1877b3783469ee7e443fe7878"
+    },
+    {
+      "path": "ios/App/MainView.swift",
+      "status": "modified",
+      "sha256": "0e4edd15cf7c88e53c7401bc1098cdc3039944aec5c6b54fd43cb1c0d05e2798"
+    },
+    {
+      "path": "ios/App/MetalRenderer.swift",
+      "status": "modified",
+      "sha256": "617aaca05f0aef7c8e4ac78afcf1088a09239b0b6c7b11364fae7c0369ab9143"
+    },
+    {
+      "path": "ios/App/MotionTracker.swift",
+      "status": "modified",
+      "sha256": "1b09946f364ef1db3d9389ceae78bedb34b2e421e1e6d51f9c4e9b8f9e79e5ce"
+    },
+    {
+      "path": "ios/App/RearCameraTracker.swift",
+      "status": "added",
+      "sha256": "10f6db85ea12718e1215ba5927385dba76a7dffd04bb939656e0a1367ff78f54"
+    },
+    {
+      "path": "ios/App/Settings.swift",
+      "status": "modified",
+      "sha256": "b831b42856cfdcc02374b4fb9ef4fbe5b4d7da466818a2996077f6692ad41be3"
+    },
+    {
+      "path": "ios/App/Viewer.metal",
+      "status": "modified",
+      "sha256": "66ac92ed10b53db59b6fe3b15364f227b2872af3bd0116481f8a274e732102fb"
+    },
+    {
+      "path": "ios/Core/MotionWire.swift",
+      "status": "modified",
+      "sha256": "e59d8826770ddafed69b5de4c8e9d77f7d4e0686afcf1eee5633f4133d421695"
+    },
+    {
+      "path": "ios/Core/SpatialPose.swift",
+      "status": "added",
+      "sha256": "cf913a7e5fe73f245ff4d935edb81ed78e234e86628b4f956755787e9c1dd7db"
+    },
+    {
+      "path": "ios/NetDisplay.xcodeproj/project.pbxproj",
+      "status": "modified",
+      "sha256": "8664048b846f4a77705fd78cea1bff517dfdc592365bcbd480355297dc299abb"
+    },
+    {
+      "path": "ios/OVERLAY-SHA256SUMS.txt",
+      "status": "modified",
+      "sha256": "e9e5b7bf6e420dbecf4c39f58957b55bf19ca0e0c324026aa7a6bedb5705de84"
+    },
+    {
+      "path": "ios/README.md",
+      "status": "modified",
+      "sha256": "689a559e35eda48e81be3bce09a993c65a5447ca580e6c0a6c95b1ded5dc3763"
+    },
+    {
+      "path": "ios/Tests/main.swift",
+      "status": "modified",
+      "sha256": "3d964b97e86d2a464f4665be8c7ac7117d18092d39377bb71dfc06898822dfc2"
+    },
+    {
+      "path": "ios/Tests/test_spatial.py",
+      "status": "added",
+      "sha256": "f53f144b2746f25b505102500a1b85024eb6936be142aa73d499e6e894c2c529"
+    },
+    {
+      "path": "ios/docs/MOTION-PROTOCOL.md",
+      "status": "modified",
+      "sha256": "d3a3879c19b703c96cc22a5253a57cde31454204027dbfec5117de82d6a7bca7"
+    },
+    {
+      "path": "ios/docs/TROUBLESHOOTING.md",
+      "status": "modified",
+      "sha256": "4582ad98fa90a6ca169199b38568597ea68d000f5f022646298bcfb8adad7d87"
+    },
+    {
+      "path": "ios/docs/VALIDATION.md",
+      "status": "modified",
+      "sha256": "11afe8a6fc6cfe0711873e239a2a9a805050a2991734d8cadf228b19bd799933"
+    },
+    {
+      "path": "ios/scripts/check_source.py",
+      "status": "modified",
+      "sha256": "2eeff5fee872924b7c7f5a5c3026c19d566a34a94946b8340d2e5a63f403dde5"
+    },
+    {
+      "path": "ios/scripts/generate_project.py",
+      "status": "modified",
+      "sha256": "0ebecd310001014c2b9b557273fc49fda142934a2a0c4bc39f61fffb2c2440cd"
+    },
+    {
+      "path": "ios/scripts/test.sh",
+      "status": "modified",
+      "sha256": "7f97f633cc510eabeb6be6a90c6a785d829a6e3aabf820e02020b84ce153dcd5"
+    },
+    {
+      "path": "steamvr/CMakeLists.txt",
+      "status": "modified",
+      "sha256": "916f62b63ba4bb8f423768cbf15aa84de8323c2813337580d9a0c5ddc75587c4"
+    },
+    {
+      "path": "steamvr/driver.cpp",
+      "status": "modified",
+      "sha256": "2334074cf9170bfb5ada6d0d959da60700720a8a43a9299b48efd2bf83f14f03"
+    },
+    {
+      "path": "steamvr/motion.hpp",
+      "status": "modified",
+      "sha256": "09f8ac08f4a1cdca4e0ce3d647a0fcbf76341f140f8ffdc09ff08c31914824e6"
+    },
+    {
+      "path": "steamvr/motion_test.cpp",
+      "status": "modified",
+      "sha256": "167ececdf4eee62bf3ae6e179b33c25d3817f73aab004048ffc17833923d140f"
+    },
+    {
+      "path": "steamvr/resources/settings/default.vrsettings",
+      "status": "modified",
+      "sha256": "1267854ee56abfcdb40c9b524edc9e2891292abbc904abe6a533159b45bf57d7"
+    },
+    {
+      "path": "steamvr/tracking_space.hpp",
+      "status": "added",
+      "sha256": "87ebef457bd70258915e439044c3e1bb090c400c754cde3b281f6b477a314ff2"
+    },
+    {
+      "path": "steamvr/tracking_space_test.cpp",
+      "status": "added",
+      "sha256": "fc542cc3d12b087d3f338fe673548cd3e50282ff06ccfb541e17e59d0c43401e"
+    },
+    {
+      "path": "tools/ios/motion_protocol.py",
+      "status": "modified",
+      "sha256": "4b5752c03ea04ceaf5d24c830975263ebaeaa5d3ada7e4ce8d0293b82aa53419"
+    },
+    {
+      "path": "tools/ios/pose_receiver.py",
+      "status": "modified",
+      "sha256": "d6242ef59147836112b228a125c9c6b593f426f46f7207ca2de30e150e6bda11"
+    },
+    {
+      "path": "vr/CMakeLists.txt",
+      "status": "modified",
+      "sha256": "71c3844b4b0040ffc268d0f36c467fd4b881fa7328b059a5f5adc1204c94e73c"
+    },
+    {
+      "path": "vr/capture.cpp",
+      "status": "modified",
+      "sha256": "c18341754403ef4353289bff50bada5252fe01f5d514df7e9e02f7b52148fe98"
+    },
+    {
+      "path": "vr/capture.h",
+      "status": "modified",
+      "sha256": "801e628ed2d5ece141514e4fdef5b39ae024c4235e9497a744faf4f7d0fe3e0b"
+    },
+    {
+      "path": "vr/diagnose.cpp",
+      "status": "added",
+      "sha256": "b6c8a8709fdb5b6da744b4f2f038cec6acaf73d8d6d28b40030d840e15fad9da"
+    },
+    {
+      "path": "vr/netdisplay-vr.py",
+      "status": "modified",
+      "sha256": "3f3780f8223580846aa66aad15882e8cf376c8dccc9025de745d9d29acaadffc"
+    },
+    {
+      "path": "vr/server.c",
+      "status": "modified",
+      "sha256": "bc60ddc5a2647334fa6d38d488cdde6fbab1e5d2217fba7618a6fbf870254a3b"
+    },
+    {
+      "path": "vr/tests/launcher_test.py",
+      "status": "added",
+      "sha256": "bc23e46b8b992f3725bfea44a998b13d5a79e1923f5810c185aa73a89d491fce"
+    },
+    {
+      "path": "vr/tests/video_tx_test.c",
+      "status": "added",
+      "sha256": "ec26f046ddb601a8f6345fc3d8ee467d37368beed42b8e8926c564c6709b719f"
+    },
+    {
+      "path": "vr/video_tx.c",
+      "status": "added",
+      "sha256": "00144bafd3899dfd615759c336fbf7196daf05607186138a88e6251f67c55f7f"
+    },
+    {
+      "path": "vr/video_tx.h",
+      "status": "added",
+      "sha256": "6f3088175ebf6409f884bc6dae1e40bfef028b7abd434eebf6100093325e9301"
+    }
+  ],
+  "deleted_files": [],
+  "validation": "VR-VALIDATION.md",
+  "self_excluded": "VR-PATCH-MANIFEST.json"
+}

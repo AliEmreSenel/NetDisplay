@@ -1,3 +1,5 @@
+> Historical report for an earlier app revision. For the current tracking/AR patch and its unverified platform builds, see [VR-VALIDATION.md](../../VR-VALIDATION.md).
+
 # Validation record
 
 Package prepared on **2026-10-03** against the user's uploaded `NetDisplay-master(1)(1).zip`.

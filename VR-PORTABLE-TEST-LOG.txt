@@ -1,0 +1,10 @@
+PASS: 45 Swift protocol / Annex-B / motion / spatial checks
+PASS: 12 spatial wire checks; v1/v2 C++ fixtures written
+SteamVR motion validation passed
+PASS: TX ownership, newest-frame replacement, obsolete/deadline cancellation, error accounting and shutdown
+PASS: stationary origin JSON
+Updated: 1280x720@60 h264_nvenc QP=30; height=1.65 m
+Restart the VR backend as well as SteamVR; select the same video mode on iOS.
+PASS: launcher tune, matching capture/HMD mode, preserved pairing paths, validation and file permissions
+PASS: Xcode source membership, scheme, permissions, privacy manifest, assets, protocol version and credential-free workflow
+PASS: CI YAML and camera permission plist

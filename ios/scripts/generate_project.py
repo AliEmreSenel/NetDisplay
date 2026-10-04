@@ -34,7 +34,7 @@ for path in sources + ['App/Info.plist','App/PrivacyInfo.xcprivacy','Native/NDNa
         source_build.append(add('build:'+path,{'isa':'PBXBuildFile','fileRef':file}))
     elif path.endswith(('.xcprivacy','.xcassets')):
         resource_build.append(add('build:'+path,{'isa':'PBXBuildFile','fileRef':file}))
-for name in ['UIKit','SwiftUI','Foundation','Security','CoreMotion','CoreMedia','CoreVideo','VideoToolbox','Metal','MetalKit','QuartzCore']:
+for name in ['UIKit','SwiftUI','Foundation','Security','ARKit','AVFoundation','CoreMotion','CoreMedia','CoreVideo','VideoToolbox','Metal','MetalKit','QuartzCore']:
     path=f'System/Library/Frameworks/{name}.framework'
     file=add('framework:'+name,{'isa':'PBXFileReference','lastKnownFileType':'wrapper.framework','name':name+'.framework','path':path,'sourceTree':'SDKROOT'})
     refs.append(file); framework_build.append(add('link:'+name,{'isa':'PBXBuildFile','fileRef':file}))

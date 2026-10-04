@@ -11,6 +11,7 @@
     "motionPort": 5010,
     "bindAddress": "127.0.0.1",
     "peerAddress": "127.0.0.1",
-    "tokenFile": ""
+    "tokenFile": "",
+    "headHeight": 1.6
   }
 }

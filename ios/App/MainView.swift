@@ -84,7 +84,7 @@ struct MainView: View {
                     Picker("Mode", selection: $model.settings.viewerPurpose) {
                         ForEach(ViewerPurpose.allCases) { Text($0.rawValue).tag($0) }
                     }.disabled(model.busy)
-                    Text("Touch Display forwards all contacts in the video area to Linux. VR displays stereo video and sends head rotation to the SteamVR driver.")
+                    Text("Touch Display forwards all contacts in the video area to Linux. VR displays stereo video and sends head tracking to the SteamVR driver.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if model.settings.viewerPurpose == .vr {
@@ -109,10 +109,22 @@ struct MainView: View {
                         Button("Motion room") { model.openViewer(test: 2) }.buttonStyle(.borderedProminent)
                     }
                     knob("Test-room vertical FOV", value: $model.settings.demoFOV, range: 50...110)
-                    Text("The room uses the phone's orientation locally. It does not measure streaming latency. Single tap shows controls; double tap recenters; hold to exit.").font(.caption).foregroundStyle(.secondary)
+                    Text("The room uses the selected tracking mode locally. It does not measure streaming latency. Single tap shows controls; double tap recenters; hold to exit.").font(.caption).foregroundStyle(.secondary)
                 }
                 if model.settings.viewerPurpose == .vr {
                     Section("Motion to Linux") {
+                        Toggle("Rear-camera position (experimental)", isOn: $model.settings.rearCameraTracking).disabled(model.busy)
+                        Text("Off: Core Motion rotation only. On: ARKit camera-based position and orientation. The rear cameras must see a well-lit, textured room, not the viewer shell. No measured safety boundary is provided. Test seated first.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if model.settings.rearCameraTracking {
+                            Text("Optional camera-to-head offset in landscape headset axes, in metres. +X right, +Y up, +Z toward wearer. Zero tracks the camera, not the eye midpoint.").font(.caption)
+                            HStack {
+                                Text("X / Y / Z (m)")
+                                TextField("0", value: $model.settings.savedHeadOffsetX, format: .number).keyboardType(.numbersAndPunctuation)
+                                TextField("0", value: $model.settings.savedHeadOffsetY, format: .number).keyboardType(.numbersAndPunctuation)
+                                TextField("0", value: $model.settings.savedHeadOffsetZ, format: .number).keyboardType(.numbersAndPunctuation)
+                            }.disabled(model.busy)
+                        }
                         Toggle("Send authenticated motion UDP", isOn: $model.settings.sendMotion).disabled(model.busy)
                         HStack { Text("Motion port"); Spacer()
                             TextField("5010", value: $model.settings.motionPort, format: .number.grouping(.never))
@@ -122,9 +134,9 @@ struct MainView: View {
                             model.copyMotionToken(); copied = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { copied = false }
                         }.disabled(!model.motionTokenReady)
-                        Text("Pair the SteamVR driver with this token using steamvr/README.md. For standalone tests, use pose_receiver.py or pose_demo.py instead. Motion starts after the video connection succeeds.")
+                        Text("Pair the dedicated SteamVR driver with this token using VR-TRACKING-FIX.md. For standalone tests, use pose_receiver.py or pose_demo.py instead. Network motion starts after the video connection succeeds.")
                             .font(.caption).foregroundStyle(.secondary)
-                        Text("3DoF rotation only. SteamVR HMD emulation is supplied in steamvr/. No positional tracking, controllers, gaze tracking, foveation or audio.").font(.caption).foregroundStyle(.secondary)
+                        Text("Use the patched vr/ driver for optional ARKit 6DoF. Existing drivers accept 3DoF only. No controllers, gaze tracking, foveation or audio.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }.navigationTitle("Viewer & motion").navigationBarTitleDisplayMode(.inline)
@@ -150,6 +162,9 @@ struct MainView: View {
                     LabeledContent("Decoder errors", value: "\(model.metrics.decodeErrors)")
                     LabeledContent("Measured motion rate", value: String(format: "%.1f Hz", model.metrics.motionHz))
                     LabeledContent("Motion packets sent / dropped", value: "\(model.metrics.motionSent) / \(model.metrics.motionDropped)")
+                    LabeledContent("Tracking", value: model.metrics.trackingStatus)
+                    LabeledContent("Position valid", value: model.metrics.positionValid ? "Yes" : "No")
+                    LabeledContent("Relative XYZ (m)", value: String(format: "%.3f / %.3f / %.3f", model.metrics.position.x, model.metrics.position.y, model.metrics.position.z))
                     LabeledContent("Thermal state", value: model.thermalText)
                     if !model.metrics.lastError.isEmpty { Text(model.metrics.lastError).font(.caption).foregroundStyle(.orange) }
                     ShareLink(item: model.report) { Label("Share diagnostic report", systemImage: "square.and.arrow.up") }
@@ -175,7 +190,7 @@ struct MainView: View {
                 }
                 Section("Scope") {
                     Text("The app streams video and sends head orientation. Your stock NetDisplay server does not consume head pose: use the included Linux tools or integrate their documented packet format into your renderer. Duplicating a desktop in both eyes does not create stereoscopic geometry.")
-                    Text("No cloud account, analytics, microphone or camera access is used. Passwords are not saved. The motion token is kept in the local Keychain. Video encryption is optional; motion is authenticated but not encrypted.")
+                    Text("No cloud account, analytics or microphone access is used. Optional AR tracking uses the rear camera locally; camera images are not recorded or transmitted. Passwords are not saved. The motion token is kept in the local Keychain. Video encryption is optional; motion is authenticated but not encrypted.")
                 }
             }.navigationTitle("Setup notes").navigationBarTitleDisplayMode(.inline)
         }

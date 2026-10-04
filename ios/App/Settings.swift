@@ -31,6 +31,16 @@ struct AppSettings: Codable, Equatable {
     var authMode = AuthMode.password
     var encryptVideo = false
     var allowHEVC = false
+    // Optional stored fields retain compatibility with existing saved settings.
+    var savedRearCameraTracking: Bool? = nil
+    var rearCameraTracking: Bool {
+        get { savedRearCameraTracking ?? false }
+        set { savedRearCameraTracking = newValue }
+    }
+    var savedHeadOffsetX: Double? = nil, savedHeadOffsetY: Double? = nil, savedHeadOffsetZ: Double? = nil
+    var cameraToHeadOffset: Vec3 {
+        Vec3(x: savedHeadOffsetX ?? 0, y: savedHeadOffsetY ?? 0, z: savedHeadOffsetZ ?? 0)
+    }
     var sendMotion = true
     var motionPort = 5010
     var cameraOnLeft = true
@@ -50,6 +60,10 @@ struct AppSettings: Codable, Equatable {
         return p.count == 2 ? (p[0], p[1]) : (1280, 720)
     }
     func validate() throws {
+        let offset = cameraToHeadOffset
+        guard [offset.x,offset.y,offset.z].allSatisfy({ $0.isFinite && abs($0) <= 0.5 }) else {
+            throw NDError.message("Camera-to-head offsets must be finite values between -0.5 and 0.5 metres")
+        }
         guard SocketIO.isIPv4(host) else { throw NDError.message("Enter the Linux computer's IPv4 address on the USB/hotspot interface, not the iPhone's gateway address.") }
         guard (1...65535).contains(controlPort), (1...65535).contains(motionPort) else {
             throw NDError.message("Ports must be between 1 and 65535")

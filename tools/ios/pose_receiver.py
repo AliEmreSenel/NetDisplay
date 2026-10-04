@@ -31,7 +31,7 @@ def main():
                     q = " ".join(f"{x:+.4f}" for x in pose.quaternion)
                     age = (now - pose.received_at) * 1000
                     print(f"{hz:6.1f} Hz  q_xyzw=[{q}]  local-age={age:6.1f} ms  "
-                          f"recenter={pose.recenter_generation} bad={receiver.invalid} stale={receiver.stale}", flush=True)
+                          f"mode={'6dof' if pose.spatial else '3dof'} position={pose.position} valid={pose.position_valid if pose.spatial else pose.orientation_valid} recenter={pose.recenter_generation} bad={receiver.invalid} stale={receiver.stale}", flush=True)
                 else:
                     print(f"Waiting. Invalid packets={receiver.invalid}; check token, peer and UDP firewall.", flush=True)
                 start = now; previous = receiver.accepted; last_print = now

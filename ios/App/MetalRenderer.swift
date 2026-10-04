@@ -11,6 +11,7 @@ struct RenderParameters {
     var controls = SIMD4<Float>(0,0,0,0)
     var orientation = SIMD4<Float>(0,0,0,1)
     var color = SIMD4<Float>(0,0,Float.pi/2,0)
+    var position = SIMD4<Float>(0,0,0,0)
 }
 @MainActor
 final class MetalRenderer: NSObject, @preconcurrency MTKViewDelegate {
@@ -65,7 +66,11 @@ final class MetalRenderer: NSObject, @preconcurrency MTKViewDelegate {
         params.lens = SIMD4(settings.lensCorrection ? settings.k1 : 0, settings.lensCorrection ? settings.k2 : 0,
                             settings.imageScale, settings.lensCenterShift)
         params.color.z = settings.demoFOV * .pi / 180
-        let q = diagnostics.snapshot().head
+        let tracking = diagnostics.snapshot()
+        let q = tracking.head
+        if settings.rearCameraTracking {
+            params.position = SIMD4(Float(tracking.position.x), Float(tracking.position.y), Float(tracking.position.z), 0)
+        }
         params.orientation = SIMD4(Float(q.x), Float(q.y), Float(q.z), Float(q.w))
         if testMode == 0, let frame = frame, let cache = cache {
             let pixel = frame.pixels

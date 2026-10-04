@@ -37,15 +37,26 @@ struct MotionSample {
     var rate = Vec3(), acceleration = Vec3()
     var recenterGeneration: UInt32 = 0
     var cameraOnLeft = true
-    /// Fixed 96-byte body followed by HMAC-SHA256 by the platform adapter.
+    var spatial: SpatialSample? = nil
+    /// 96-byte NDM1 or 128-byte NDM2 body, followed by HMAC-SHA256.
     var body: Data {
-        var w = ByteWriter(); w.u32(0x4e444d31); w.u16(1)
-        w.u16(cameraOnLeft ? 1 : 0); w.u32(sequence); w.u64(session)
+        var w = ByteWriter(); w.u32(spatial == nil ? 0x4e444d31 : 0x4e444d32); w.u16(spatial == nil ? 1 : 2)
+        var flags: UInt16 = cameraOnLeft ? 1 : 0
+        if let spatial = spatial {
+            if spatial.positionValid { flags |= 2 }
+            if spatial.orientationValid { flags |= 4 }
+        }
+        w.u16(flags); w.u32(sequence); w.u64(session)
         w.u64(sampleNS); w.u64(sendNS)
         for v in [head.x, head.y, head.z, head.w, rate.x, rate.y, rate.z,
                   acceleration.x, acceleration.y, acceleration.z,
                   raw.x, raw.y, raw.z, raw.w] { w.f32(Float(v)) }
         w.u32(recenterGeneration)
+        if let spatial = spatial {
+            for v in [spatial.position.x, spatial.position.y, spatial.position.z,
+                      spatial.velocity.x, spatial.velocity.y, spatial.velocity.z] { w.f32(Float(v)) }
+            w.u32(spatial.quality); w.u32(0)
+        }
         return w.data
     }
 }

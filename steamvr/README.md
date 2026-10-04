@@ -18,6 +18,15 @@ Hyprland / iPhone session has **not** been validated. Extended-display support
 and window placement must be verified on the target SteamVR/compositor versions;
 a successful driver build alone does not establish game compatibility.
 
+**Confirmed limitation (2026-10-04):** SteamVR 2.17.10 on the tested Hyprland
+Wayland session loads this driver and selects `netdisplay-ios-hmd`, but its
+compositor rejects the headless display with `VR requires direct mode` and
+`VRInitError_Compositor_CannotDRMLeaseDisplay`. Both `steamvr.displayDebug` and
+the driver's `Prop_DisplayDebugMode_Bool` were tested and did not bypass this
+requirement. This configuration cannot render VR through the extended-desktop
+path above. It needs a different compositor integration (such as a driver that
+receives rendered frames directly), not additional phone pairing or room setup.
+
 ## Build
 
 Install a C++17 compiler, CMake, pkg-config and libsodium development files.
@@ -33,9 +42,11 @@ ctest --test-dir build-steamvr --output-on-failure
 ```
 
 The complete driver package is `build-steamvr/netdisplay`, including
-`bin/linux64/driver_netdisplay.so`, manifest and default settings. Keep the
-package at a stable absolute path when registering it; rebuilding copies the
-source defaults over the build package's settings, so configure after building.
+`bin/linux64/driver_netdisplay.so`, its bundled libsodium dependency, manifest and
+default settings. Keep the complete package at a stable absolute path when
+registering it. Rebuilding preserves the build package's existing settings.
+The bundled library must be compatible with SteamVR's runtime; a host-only
+successful load does not establish runtime compatibility.
 
 ## Pair and configure
 

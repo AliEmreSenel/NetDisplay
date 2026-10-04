@@ -13,6 +13,8 @@ final class MotionTracker {
     private var session: UInt64 = 1
     private var cameraOnLeft = true
     private var enabled = false
+    private var arMode = false
+    private var rearCamera: RearCameraTracker!
     private var fd: Int32 = -1
     private var token = [UInt8]()
     private var rateStart = 0.0, rateCount = 0
@@ -25,17 +27,27 @@ final class MotionTracker {
         operationQueue.maxConcurrentOperationCount = 1
         operationQueue.qualityOfService = .userInteractive
         operationQueue.underlyingQueue = queue
+        rearCamera = RearCameraTracker(queue: queue, diagnostics: diagnostics)
+        rearCamera.onSample = { [weak self] in self?.consumeAR($0) }
+        rearCamera.onError = { [weak self] in self?.report($0) }
     }
-    func start(cameraOnLeft: Bool) {
+    func start(cameraOnLeft: Bool, positional: Bool = false, headOffset: Vec3 = Vec3()) {
         queue.async {
             self.manager.stopDeviceMotionUpdates()
-            guard self.manager.isDeviceMotionAvailable else { self.report("Core Motion is unavailable"); return }
+            self.rearCamera.stop()
+            self.arMode = positional
+            guard positional || self.manager.isDeviceMotionAvailable else { self.report("Core Motion is unavailable"); return }
             self.cameraOnLeft = cameraOnLeft
             self.anchor = nil; self.sequence = 0; self.generation = 0
             self.rateStart = 0; self.rateCount = 0
             self.session = Crypto.random(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
             if self.session == 0 { self.session = 1 }
             self.enabled = true
+            if positional {
+                self.rearCamera.start(cameraOnLeft: cameraOnLeft, headOffset: headOffset)
+                return
+            }
+            self.diagnostics.update { $0.trackingStatus = "Core Motion - 3DoF (no measured position)"; $0.position = Vec3(); $0.positionValid = false }
             self.manager.deviceMotionUpdateInterval = 1.0 / 120.0
             self.manager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: self.operationQueue) {
                 [weak self] motion, error in
@@ -46,7 +58,7 @@ final class MotionTracker {
             }
         }
     }
-    func recenter() { queue.async { self.anchor = nil } }
+    func recenter() { queue.async { self.anchor = nil; self.rearCamera.recenter() } }
     func setDestination(host: String, localIP: String, port: UInt16, token: [UInt8]) {
         queue.async {
             self.closeSocket()
@@ -66,7 +78,7 @@ final class MotionTracker {
     }
     func stop() {
         queue.async {
-            self.enabled = false; self.manager.stopDeviceMotionUpdates()
+            self.enabled = false; self.manager.stopDeviceMotionUpdates(); self.rearCamera.stop()
             self.closeSocket(); self.anchor = nil
         }
     }
@@ -86,7 +98,7 @@ final class MotionTracker {
             y: m.userAcceleration.y * 9.80665, z: m.userAcceleration.z * 9.80665))
         sequence &+= 1
         let sample = MotionSample(sequence: sequence, session: session,
-            sampleNS: UInt64(max(0, m.timestamp) * 1e9), sendNS: nd_ios_now_ns(),
+            sampleNS: UInt64(max(0, m.timestamp) * 1e9), sendNS: UInt64(ProcessInfo.processInfo.systemUptime * 1e9),
             head: head, raw: raw, rate: rate, acceleration: accel,
             recenterGeneration: generation, cameraOnLeft: cameraOnLeft)
         if fd >= 0 {
@@ -102,6 +114,34 @@ final class MotionTracker {
             let hz = Double(max(0, rateCount - 1)) / dt
             diagnostics.update { $0.motionHz = hz }
             rateStart = m.timestamp; rateCount = 1
+        }
+    }
+    private func consumeAR(_ observation: SpatialObservation) {
+        guard enabled, arMode else { return }
+        sequence &+= 1
+        let sample = MotionSample(sequence: sequence, session: session,
+            sampleNS: UInt64(max(0, observation.timestamp) * 1e9),
+            sendNS: UInt64(ProcessInfo.processInfo.systemUptime * 1e9), head: observation.head,
+            raw: observation.raw, rate: observation.rate, acceleration: Vec3(),
+            recenterGeneration: observation.generation, cameraOnLeft: cameraOnLeft,
+            spatial: observation.spatial)
+        if fd >= 0 {
+            let packet = Crypto.authenticatedMotion(sample, key: token)
+            let sent = packet.withUnsafeBytes { Darwin.send(fd, $0.baseAddress, $0.count, MSG_DONTWAIT) }
+            diagnostics.update { if sent == packet.count { $0.motionSent += 1 } else { $0.motionDropped += 1 } }
+        }
+        rateCount += 1
+        if rateStart == 0 { rateStart = observation.timestamp }
+        let dt = observation.timestamp - rateStart
+        diagnostics.update {
+            $0.head = observation.head; $0.position = observation.spatial.position
+            $0.positionValid = observation.spatial.positionValid
+            $0.trackingStatus = observation.status
+        }
+        if dt >= 1 {
+            let hz = Double(max(0, rateCount - 1)) / dt
+            diagnostics.update { $0.motionHz = hz }
+            rateStart = observation.timestamp; rateCount = 1
         }
     }
     deinit { manager.stopDeviceMotionUpdates(); if fd >= 0 { close(fd) } }

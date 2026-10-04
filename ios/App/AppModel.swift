@@ -63,7 +63,7 @@ final class AppModel: ObservableObject {
             if let error = error { self.errorText = error }
         }
         connection = c
-        if settings.viewerPurpose == .vr { motion.start(cameraOnLeft: settings.cameraOnLeft) }
+        if settings.viewerPurpose == .vr { motion.start(cameraOnLeft: settings.cameraOnLeft, positional: settings.rearCameraTracking, headOffset: settings.cameraToHeadOffset) }
         UIApplication.shared.isIdleTimerDisabled = true
         c.start()
     }
@@ -75,7 +75,7 @@ final class AppModel: ObservableObject {
     }
     func openViewer(test: Int) {
         testMode = test
-        if !busy || test > 0 { motion?.start(cameraOnLeft: settings.cameraOnLeft) }
+        if !busy { motion?.start(cameraOnLeft: settings.cameraOnLeft, positional: settings.rearCameraTracking, headOffset: settings.cameraToHeadOffset) }
         showingViewer = true; UIApplication.shared.isIdleTimerDisabled = true
     }
     func closeViewer() {
@@ -129,6 +129,8 @@ final class AppModel: ObservableObject {
         Partial frame drops: \(metrics.partialDrops); malformed/auth failures: \(metrics.malformed)
         Pending decode replacements: \(metrics.decoderReplaced); decode errors: \(metrics.decodeErrors)
         Motion: \(metrics.motionHz) Hz; sent: \(metrics.motionSent); send drops: \(metrics.motionDropped)
+        Tracking: \(metrics.trackingStatus); position valid: \(metrics.positionValid)
+        Position relative to recenter (m): \(metrics.position.x), \(metrics.position.y), \(metrics.position.z)
         Thermal: \(thermalText)
         Last pipeline error: \(metrics.lastError)
         These are LOCAL stage measurements, not end-to-end motion-to-photon latency.

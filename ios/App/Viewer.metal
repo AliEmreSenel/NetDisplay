@@ -8,6 +8,7 @@ struct Parameters {
     float4 controls;    // mode 0 flat / 1 SBS / 2 duplicate, swap, vertical shift, test 0/1/2
     float4 orientation; // headset quaternion x/y/z/w (used ONLY in local test scene)
     float4 color;       // full range, matrix (0=709, 1=601, 2=2020), demo FOV radians, spare
+    float4 position;    // optional AR position for the LOCAL demo only, not timewarp
 };
 vertex VertexOut nd_vertex(uint id [[vertex_id]]) {
     const float2 pos[3] = {float2(-1,-1), float2(3,-1), float2(-1,3)};
@@ -21,6 +22,7 @@ float3 room(float2 uv, float aspect, int eye, bool stereo, constant Parameters &
     float3 ray = normalize(float3((uv.x * 2 - 1) * aspect * scale, (1 - 2 * uv.y) * scale, -1));
     ray = rotate_q(p.orientation, ray);
     float3 origin = rotate_q(p.orientation, float3(stereo ? (eye == 0 ? -0.032 : 0.032) : 0, 0, 0));
+    origin += p.position.xyz;
     float3 rgb = mix(float3(0.025, 0.045, 0.08), float3(0.1, 0.2, 0.27), clamp(ray.y * 0.5 + 0.5, 0.0, 1.0));
     float nearest = 1000;
     if (ray.y < -0.001) {

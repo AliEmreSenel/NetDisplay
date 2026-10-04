@@ -1,6 +1,8 @@
 # Native NetDisplay iOS receiver
 
-**Target:** real arm64 iPhones, iOS 17 or newer; designed around the user's iPhone 14. No simulator target. iOS 17 is the minimum because the public hardware-decoder requirement/reporting keys are available there. Native SwiftUI shell, VideoToolbox decoding, Metal rendering, Core Motion orientation, and direct BSD sockets. No browser, WebRTC relay, subscription, camera access, or paid Apple capability is required by the app code.
+**Target:** real arm64 iPhones, iOS 17 or newer; designed around the user's iPhone 14. No simulator target. iOS 17 is the minimum because the public hardware-decoder requirement/reporting keys are available there. Native SwiftUI shell, VideoToolbox decoding, Metal rendering, Core Motion orientation, optional rear-camera ARKit 6DoF, and direct BSD sockets. No browser, WebRTC relay, subscription, or paid Apple capability is required by the app code. Camera permission is requested only for opt-in rear-camera AR tracking.
+
+For the dedicated VR backend and tracking/latency changes, first read [VR tracking fix](../VR-TRACKING-FIX.md).
 
 Start with [the repository quickstart](../QUICKSTART-IOS.md). Read [validation](docs/VALIDATION.md) before treating this as tested headset software.
 
@@ -16,9 +18,9 @@ Start with [the repository quickstart](../QUICKSTART-IOS.md). Read [validation](
 | Queues | One assembling frame, one pending compressed frame, one synchronous decode, one latest decoded image, one GPU command buffer in flight |
 | Viewer modes | Touch Display with direct multitouch forwarding, or VR / SteamVR |
 | Display | One stream; flat, duplicated mono, or side-by-side stereo; manual optical controls and eye swap |
-| Test scenes | Calibration grid and a local orientation-driven room |
+| Test scenes | Calibration grid and a local motion-driven room, including optional AR translation |
 | Head motion | Relative quaternion, raw Core Motion quaternion, angular velocity, user acceleration, timestamps, sequence, session, recenter generation |
-| SteamVR | Linux OpenVR HMD driver, stereo display geometry, authenticated 3DoF poses; see [setup](../steamvr/README.md) |
+| SteamVR | Dedicated Linux VR backend and authenticated 3DoF / optional AR 6DoF poses; see [tracking setup](../VR-TRACKING-FIX.md) |
 | Motion transport | Independent HMAC-authenticated UDP; companion Python receiver and Linux stereo test renderer |
 | Diagnostics | Local pipeline timings and counters, observed motion rate, thermal state, explicit user-shareable report |
 | CI | Standard GitHub macOS runner builds an unsigned IPA without Apple secrets |

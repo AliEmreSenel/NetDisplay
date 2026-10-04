@@ -1,4 +1,4 @@
-# NetDisplay iOS motion UDP v1
+# NetDisplay iOS motion UDP v1 / optional v2
 
 This is an **additional companion protocol**, not a message type added to the existing NetDisplay control stream. The stock Linux server does not read it. Use `tools/ios/motion_protocol.py`, `pose_receiver.py`, or `pose_demo.py`, or implement the same packet in your renderer.
 
@@ -16,7 +16,7 @@ Exactly **128 bytes**, no C-struct padding. Integers and IEEE-754 binary32 value
 | 8 | 4 | wrapping sequence number |
 | 12 | 8 | random nonzero motion session ID |
 | 20 | 8 | Core Motion sample timestamp, seconds-since-boot converted to ns |
-| 28 | 8 | iPhone `CLOCK_MONOTONIC` send timestamp, ns |
+| 28 | 8 | iPhone system uptime send timestamp, ns (older clients used CLOCK_MONOTONIC) |
 | 36 | 16 | relative headset quaternion x, y, z, w |
 | 52 | 12 | headset-frame angular velocity x, y, z, rad/s |
 | 64 | 12 | headset-frame user acceleration x, y, z, m/s^2; gravity removed |
@@ -53,8 +53,12 @@ This supplies **3DoF rotation**, not 6DoF. Do not integrate phone acceleration t
 
 ## Time and freshness
 
-The sample and send timestamp fields come from different iOS APIs. They are useful for ordering and future clock characterization, but the implementation does not establish their exact cross-API offset under suspend/resume. Do not subtract them without verification, and do not subtract either from the Linux monotonic clock to claim one-way latency. There is no clock synchronization exchange in v1.
-
+The updated client uses `ProcessInfo.systemUptime` for send time, matching the
+seconds-since-boot sample convention. The driver includes plausible (0..1 second)
+phone-side sample-to-send age in pose freshness/prediction. It ignores negative or
+implausible differences for compatibility with older clients. This is not a clock
+synchronization protocol: never subtract a phone timestamp from a Linux timestamp
+to claim network or motion-to-photon latency.
 The Python receiver timestamps arrival with Linux `time.monotonic()` and displays only time since the most recent accepted local arrival. That is freshness, not network transport latency or motion-to-photon latency.
 
 Sequence numbers increment per sample. A new random session is created when motion capture restarts. Recenter changes the orientation origin and increments the generation; renderers should not interpolate across that discontinuity. Serial comparisons use the uint32 half-range rule so sequence wrap works.
@@ -82,3 +86,30 @@ python3 tools/ios/pose_demo.py --token-file ~/.config/netdisplay/ios-motion.key 
 ```
 
 The demo renders world-space geometry twice from separate eye positions, then draws a side-by-side window. Move that window to the NetDisplay headless output and use F11 for fullscreen. It is Python/Tk software drawing, not an optimized benchmark. Its rendering cost and scheduling are part of the observed streaming behavior; do not use it to claim NVENC or iPhone minimum latency.
+
+## Optional AR packet v2
+
+AR mode emits **160 bytes**: a 128-byte body followed by HMAC-SHA256 over the
+entire body, using the same motion token. NDM1 remains exactly unchanged when
+AR is disabled. The current `steamvr/motion.hpp` and Python decoder accept both.
+
+Offsets 0..95 retain the v1 field arrangement, with ASCII `NDM2`, version 2,
+flags bit0 = camera on left, bit1 = measured position valid, bit2 = orientation
+valid. Raw quaternion now denotes the AR camera's landscape-oriented world
+pose, not Core Motion. The acceleration fields are zero in this mode. Head
+quaternion is relative to a yaw-only origin so gravity remains upright.
+
+| Offset | Bytes | Field |
+|---:|---:|---|
+| 96 | 12 | relative head position x,y,z, metres, float32 |
+| 108 | 12 | relative world-frame linear velocity x,y,z, m/s, float32 |
+| 120 | 4 | quality: 0 unavailable, 1 limited, 2 normal |
+| 124 | 4 | reserved, must be zero |
+| 128 | 32 | HMAC-SHA256 of bytes 0..127 |
+
+Position-valid requires orientation-valid and quality 2. Invalid AR tracking is
+not silently replaced by a claimed measured position. Velocity is estimated from
+consecutive normal camera poses, reset at recenter/loss, and bounded. Linux adds
+configured head height to relative Y. Loss after an established map and detected
+jumps require explicit recenter before valid tracking resumes. Camera images stay
+local. See `../../VR-TRACKING-FIX.md` for optics, floor-height and safety limitations.

@@ -22,6 +22,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Optional rear-camera AR tracking estimates headset position and orientation. Camera images stay on this phone; only pose data is sent to your Linux computer.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connect to your Linux NetDisplay computer over USB tethering or local Wi-Fi to receive video and send head orientation.</string>
 	<key>NSMotionUsageDescription</key>
