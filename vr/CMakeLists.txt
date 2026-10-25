@@ -49,6 +49,12 @@ if(BUILD_TESTING)
   add_test(NAME vr-launcher COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_test.py")
   add_test(NAME vr-control COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/control_test.py" $<TARGET_FILE:netdisplay-vr-server>)
+  set_tests_properties(vr-control PROPERTIES ENVIRONMENT
+    "NETDISPLAY_VR_RATE_CONTROL=qp;NETDISPLAY_VR_QP=28;NETDISPLAY_VR_BITRATE_KBPS=20000")
+  add_test(NAME vr-control-bandwidth COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/control_test.py" $<TARGET_FILE:netdisplay-vr-server>)
+  set_tests_properties(vr-control-bandwidth PROPERTIES ENVIRONMENT
+    "NETDISPLAY_VR_RATE_CONTROL=bandwidth;NETDISPLAY_VR_QP=28;NETDISPLAY_VR_BITRATE_KBPS=20000")
   include(../cmake/NetDisplayMotionTests.cmake)
   if(NOT TARGET netdisplay-video-tx-test)
     include(../cmake/NetDisplayVideoTests.cmake)

@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <libavcodec/avcodec.h>
+#include "encoder_rate.h"
 
 struct nd_encoder {
   AVCodecContext *context;
@@ -13,8 +14,10 @@ struct nd_encoder {
 /* All callers submit independent I frames. Software fallback is selected by
  * name only; automatic negotiation considers hardware encoders exclusively. */
 int nd_encoder_open(struct nd_encoder *, const char *name, int width, int height,
-                     int fps, int qp, enum AVPixelFormat preferred, int quiet);
+                     int fps, const struct nd_encoder_rate *rate,
+                     enum AVPixelFormat preferred, int quiet);
 void nd_encoder_close(struct nd_encoder *);
 int nd_video_choose_encoder(uint16_t codec, int width, int height, int fps,
-                            int qp, char *name, size_t name_size);
+                            const struct nd_encoder_rate *rate,
+                            char *name, size_t name_size);
 #endif

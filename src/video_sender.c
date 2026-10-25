@@ -69,7 +69,7 @@ static uint64_t frame_pts;
 static int udp_fd = -1;
 static uint64_t session_id;
 static uint32_t seq_id;
-static int qp = 24;
+static struct nd_encoder_rate encoder_rate;
 static uint32_t stream_width;
 static uint32_t stream_height;
 static uint32_t stream_fps;
@@ -279,7 +279,7 @@ static void alloc_capture_buffer(uint32_t format, uint32_t width,
 
 static void init_encoder(void) {
   if (nd_encoder_open(&encoder, selected_encoder, (int)stream_width,
-                       (int)stream_height, (int)stream_fps, qp, capture_format, 0) < 0) {
+                       (int)stream_height, (int)stream_fps, &encoder_rate, capture_format, 0) < 0) {
     fprintf(stderr, "cannot open encoder '%s'\n", selected_encoder);
     exit(EXIT_FAILURE);
   }
@@ -317,9 +317,9 @@ static void init_encoder(void) {
 
   fprintf(
       stderr,
-      "%s via %s: %ux%u@%u QP=%d transfer=%s encoder=%s capture=%s all-intra\n",
+      "%s via %s: %ux%u@%u transfer=%s encoder=%s capture=%s all-intra\n",
       ndc_codec_name(selected_codec), selected_encoder, stream_width,
-      stream_height, stream_fps, qp,
+      stream_height, stream_fps,
       av_get_pix_fmt_name(encoder_sw_format)
           ? av_get_pix_fmt_name(encoder_sw_format)
           : "?",
@@ -327,6 +327,12 @@ static void init_encoder(void) {
                                         : "?",
       av_get_pix_fmt_name(capture_format) ? av_get_pix_fmt_name(capture_format)
                                           : "?");
+  if (encoder_rate.mode == ND_RATE_QP)
+    fprintf(stderr, "rate-control=qp QP=%d\n", encoder_rate.qp);
+  else
+    fprintf(stderr, "rate-control=bandwidth target=%lld peak=%lld kbit/s VBV=%d bits\n",
+            (long long)enc->bit_rate / 1000,
+            (long long)enc->rc_max_rate / 1000, enc->rc_buffer_size);
 }
 
 static void print_stats(void) {
@@ -553,18 +559,19 @@ static void request_frame(void) {
 }
 
 int nd_video_sender_run(const char *output_name, const char *ip, int port,
-                        int qp_value, int width, int height, int refresh_hz,
+                        const struct nd_encoder_rate *rate,
+                        int width, int height, int refresh_hz,
                         uint64_t wire_session, int encrypted, int key_fd,
                         uint16_t video_codec, const char *encoder_name) {
   if (!output_name || !*output_name || !ip || !*ip || port <= 0 ||
-      port > 65535 || qp_value < 0 || qp_value > 51 || width <= 0 ||
+      port > 65535 || !nd_encoder_rate_valid(rate) || width <= 0 ||
       width > UINT16_MAX || (width & 1) || height <= 0 || height > UINT16_MAX ||
       (height & 1) || refresh_hz <= 0 || refresh_hz > UINT16_MAX ||
       !ndc_codec_bit(video_codec) || !encoder_name || !*encoder_name) {
     fprintf(stderr, "invalid built-in video sender parameters\n");
     return 2;
   }
-  qp = qp_value;
+  encoder_rate = *rate;
   selected_codec = video_codec;
   snprintf(selected_encoder, sizeof(selected_encoder), "%s", encoder_name);
   stream_width = (uint32_t)width;

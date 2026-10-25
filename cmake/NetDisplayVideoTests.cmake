@@ -1,4 +1,10 @@
 include_guard(GLOBAL)
+add_executable(netdisplay-encoder-rate-test
+    "${NETDISPLAY_SOURCE_DIR}/tests/encoder_rate_test.c")
+target_link_libraries(netdisplay-encoder-rate-test PRIVATE nd_video)
+add_test(NAME encoder-rate-control COMMAND netdisplay-encoder-rate-test)
+set_tests_properties(encoder-rate-control PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+
 # Test the shared worker with a deterministic transport double and real AVPackets.
 add_executable(netdisplay-video-tx-test
     "${NETDISPLAY_SOURCE_DIR}/tests/video_tx_test.c"
@@ -17,3 +23,5 @@ target_include_directories(netdisplay-stream-test PRIVATE "${NETDISPLAY_SOURCE_D
 target_link_libraries(netdisplay-stream-test PRIVATE nd_video)
 add_test(NAME integrated-video-stream COMMAND netdisplay-stream-test)
 set_tests_properties(integrated-video-stream PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77)
+add_test(NAME integrated-video-stream-bandwidth COMMAND netdisplay-stream-test bandwidth)
+set_tests_properties(integrated-video-stream-bandwidth PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77)

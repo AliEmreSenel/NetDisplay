@@ -36,7 +36,7 @@ struct host_cfg {
   int video_port;
   int input_enabled;
   int power_devices;
-  int qp;
+  struct nd_encoder_rate rate;
   uint16_t video_codec; /* 0=auto */
   int max_clients;
   int max_displays_per_client;
@@ -57,7 +57,7 @@ static void cfg_defaults(struct host_cfg *c) {
   c->video_port = NDC_DEFAULT_VIDEO_PORT;
   c->input_enabled = 0;
   c->power_devices = 1;
-  c->qp = 24;
+  c->rate = (struct nd_encoder_rate){ND_RATE_QP, 24, ND_DEFAULT_BITRATE_KBPS};
   c->max_clients = 8;
   c->max_displays_per_client = NDC_MAX_DISPLAYS;
   c->max_width = 8192;
@@ -96,8 +96,19 @@ static void load_cfg(const char *path, struct host_cfg *c) {
     else if (!strcmp(k, "input_enabled"))
       c->input_enabled = atoi(v) != 0;
     else if (!strcmp(k, "qp"))
-      c->qp = atoi(v);
-    else if (!strcmp(k, "video_codec")) {
+      c->rate.qp = atoi(v);
+    else if (!strcmp(k, "rate_control")) {
+      if (nd_rate_control_parse(v, &c->rate.mode) < 0) {
+        fprintf(stderr, "rate_control must be qp or bandwidth in %s\n", path);
+        exit(2);
+      }
+    } else if (!strcmp(k, "bitrate_kbps")) {
+      if (nd_bitrate_kbps_parse(v, &c->rate.bitrate_kbps) < 0) {
+        fprintf(stderr, "bitrate_kbps must be 1..%d in %s\n",
+                ND_MAX_BITRATE_KBPS, path);
+        exit(2);
+      }
+    } else if (!strcmp(k, "video_codec")) {
       if (!strcmp(v, "auto")) c->video_codec = 0;
       else if (!strcmp(v, "av1")) c->video_codec = NDC_VIDEO_AV1;
       else if (!strcmp(v, "hevc") || !strcmp(v, "h265")) c->video_codec = NDC_VIDEO_HEVC;
@@ -150,7 +161,7 @@ static void load_cfg(const char *path, struct host_cfg *c) {
   }
   fclose(f);
   if (c->port <= 0 || c->port > 65535 || c->video_port <= 0 ||
-      c->video_port > 65535 || c->qp < 0 || c->qp > 51 || !c->output[0] ||
+      c->video_port > 65535 || !nd_encoder_rate_valid(&c->rate) || !c->output[0] ||
       c->max_clients <= 0 || c->max_clients > 32 ||
       c->max_displays_per_client <= 0 ||
       c->max_displays_per_client > (int)NDC_MAX_DISPLAYS || c->max_width <= 0 ||
@@ -538,9 +549,10 @@ static pid_t spawn_builtin_sender(const struct host_cfg *cfg, const char *peer,
                                   int encrypted) {
   enum { CHILD_KEY_FD = 196 };
   char portbuf[16], qpbuf[16], widthbuf[16], heightbuf[16], refreshbuf[16];
-  char sessionbuf[32], encryptedbuf[8], keyfdbuf[16], codecbuf[16];
+  char sessionbuf[32], encryptedbuf[8], keyfdbuf[16], codecbuf[16], bitratebuf[16];
   snprintf(portbuf, sizeof(portbuf), "%d", st->port);
-  snprintf(qpbuf, sizeof(qpbuf), "%d", cfg->qp);
+  snprintf(qpbuf, sizeof(qpbuf), "%d", cfg->rate.qp);
+  snprintf(bitratebuf, sizeof(bitratebuf), "%d", cfg->rate.bitrate_kbps);
   snprintf(widthbuf, sizeof(widthbuf), "%d", st->width);
   snprintf(heightbuf, sizeof(heightbuf), "%d", st->height);
   snprintf(refreshbuf, sizeof(refreshbuf), "%d", st->refresh_hz);
@@ -564,6 +576,8 @@ static pid_t spawn_builtin_sender(const struct host_cfg *cfg, const char *peer,
       keyfdbuf,
       codecbuf,
       (char *)st->encoder_name,
+      cfg->rate.mode == ND_RATE_QP ? (char *)"qp" : (char *)"bandwidth",
+      bitratebuf,
       NULL,
   };
 
@@ -781,7 +795,7 @@ static void *session_main(void *opaque) {
     for (unsigned i = 0; i < count; i++) {
       struct server_stream *st = &streams[i];
       if (nd_video_choose_encoder(candidate_codec, st->width, st->height,
-                                  st->refresh_hz, cfg->qp,
+                                  st->refresh_hz, &cfg->rate,
                                   selected_encoders[i],
                                   sizeof(selected_encoders[i])) < 0) {
         usable = 0;
@@ -983,11 +997,19 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && !strcmp(argv[1], "--derive-password-key"))
     return derive_password_key_cli();
-  if (argc == 14 && !strcmp(argv[1], "--video-sender"))
-    return nd_video_sender_run(argv[2], argv[3], atoi(argv[4]), atoi(argv[5]),
+  if ((argc == 14 || argc == 16) && !strcmp(argv[1], "--video-sender")) {
+    struct nd_encoder_rate rate = {ND_RATE_QP, atoi(argv[5]), ND_DEFAULT_BITRATE_KBPS};
+    if (argc == 16 &&
+        (nd_rate_control_parse(argv[14], &rate.mode) < 0 ||
+         nd_bitrate_kbps_parse(argv[15], &rate.bitrate_kbps) < 0)) {
+      fprintf(stderr, "invalid built-in video sender rate control\n");
+      return 2;
+    }
+    return nd_video_sender_run(argv[2], argv[3], atoi(argv[4]), &rate,
                                atoi(argv[6]), atoi(argv[7]), atoi(argv[8]),
                                strtoull(argv[9], NULL, 10), atoi(argv[10]),
                                atoi(argv[11]), (uint16_t)atoi(argv[12]), argv[13]);
+  }
 
   if (argc != 2) {
     fprintf(stderr, "usage: %s SERVER_CONFIG\n", argv[0]);

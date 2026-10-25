@@ -19,7 +19,16 @@ source_output=
 # Host backlight name from /sys/class/backlight, an absolute directory, auto,
 # or none. Changes are pushed immediately over the control connection.
 brightness_device=auto
+# qp: fixed quantizer, variable bandwidth. bandwidth: capped VBR, variable QP.
+# Applies per display/stream; restart the server after changing these settings.
+rate_control=qp
+# Used only in qp mode. Lower values give higher quality and larger frames.
 qp=24
+# Used only in bandwidth mode. Decimal kbit/s; 20000 = 20 Mbit/s per stream.
+# Encoder target is 80% of this peak, with a two-frame VBV reservoir. This is
+# not packet pacing or a strict wire-rate cap; allow room for transport overhead
+# and bursts. There is no automatic response to network conditions yet.
+bitrate_kbps=20000
 
 # A password key makes interactive clients prompt when they connect. Generate
 # it by running `netdisplay-server --derive-password-key`; the password itself

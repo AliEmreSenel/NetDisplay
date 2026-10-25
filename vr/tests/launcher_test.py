@@ -30,7 +30,41 @@ with tempfile.TemporaryDirectory() as temporary:
     else:raise AssertionError('accepted odd width')
     assert m.CONFIG.read_bytes()==before
     assert m.CONFIG.stat().st_mode & 0o777 == 0o600
-print('PASS: launcher tune, matching capture/HMD mode, preserved pairing paths, validation and file permissions')
+    m.tune(SimpleNamespace(rate_control='bandwidth',bitrate_kbps=35000,head_height=None))
+    v=json.loads(m.CONFIG.read_text())
+    assert v['backend']['rate_control']=='bandwidth' and v['backend']['bitrate_kbps']==35000
+    assert v['backend']['qp']==30 and v['backend']['key_file']=='unchanged-secret-path'
+    before=m.CONFIG.read_bytes();settings_before=settings.read_bytes()
+    for bad in [0,-1,1000001,1.5,'20000',True]:
+        try:m.tune(SimpleNamespace(bitrate_kbps=bad,head_height=None))
+        except ValueError:pass
+        else:raise AssertionError(f'accepted invalid bitrate {bad!r}')
+        assert m.CONFIG.read_bytes()==before and settings.read_bytes()==settings_before
+    try:m.tune(SimpleNamespace(rate_control='adaptive',head_height=None))
+    except ValueError:pass
+    else:raise AssertionError('accepted unknown rate-control mode')
+    assert m.CONFIG.read_bytes()==before
+    m.tune(SimpleNamespace(rate_control='qp',head_height=None))
+    assert json.loads(m.CONFIG.read_text())['backend']['qp']==30
+    v=json.loads(m.CONFIG.read_text())
+    v['backend'].update(bind='0.0.0.0',control_port=5021,video_port=5020,auth='key')
+    for mode in ['bandwidth','qp',None]:
+        if mode is None:
+            v['backend'].pop('rate_control',None)
+            v['backend'].pop('bitrate_kbps',None)
+        else:
+            v['backend'].update(rate_control=mode,bitrate_kbps=35000)
+        m.write_json(m.CONFIG,v)
+        with patch.dict(m.os.environ,{'XDG_RUNTIME_DIR':temporary,
+                'NETDISPLAY_VR_RATE_CONTROL':'invalid','NETDISPLAY_VR_BITRATE_KBPS':'0'}):
+            with patch.object(m.os,'execv') as execute:
+                m.run()
+                execute.assert_called_once()
+                assert execute.call_args.args[1][0]==str(m.PACKAGE/'bin/netdisplay-vr-server')
+                assert m.os.environ['NETDISPLAY_VR_RATE_CONTROL']==(mode or 'qp')
+                assert m.os.environ['NETDISPLAY_VR_BITRATE_KBPS']==('20000' if mode is None else '35000')
+                assert m.os.environ['NETDISPLAY_VR_QP']=='30'
+print('PASS: launcher tune, rate-control switching, preserved pairing paths, validation and file permissions')
 
 # Exercise installation, legacy migration, and restoration without SteamVR.
 with tempfile.TemporaryDirectory() as temporary:

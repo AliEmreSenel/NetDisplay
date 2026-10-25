@@ -159,7 +159,9 @@ decoder replacement/error counters and thermal state. Compare 3DoF with AR off
 first. Raise resolution only after the baseline is stable.
 
 * Growing TX aborted/replaced counts: encoding output is outrunning transport or
-  system scheduling. Reduce resolution or increase QP (lower visual quality).
+  system scheduling. Reduce resolution, increase QP (lower visual quality), or
+  select `tune --rate-control bandwidth --bitrate-kbps 20000` to constrain the
+  encoded-video rate (20 Mbit/s peak; restart the backend after tuning).
   All-IDR is intentionally retained so dropping a frame does not corrupt a
   prediction chain. The sender has no automatic bitrate adaptation yet.
 * High readback/convert/encode times: the remaining GPU-to-CPU readback and CPU

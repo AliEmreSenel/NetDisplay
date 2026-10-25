@@ -24,14 +24,17 @@ static void decode_independently(const uint8_t *bytes, size_t size) {
   av_frame_free(&frame); av_packet_free(&packet); avcodec_free_context(&decoder);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  CHECK(argc == 1 || (argc == 2 && !strcmp(argv[1], "bandwidth")));
   CHECK(nd_ios_init() >= 0);
   if (!avcodec_find_encoder_by_name("libx264")) {
     puts("SKIP: FFmpeg was built without libx264");
     return 77;
   }
   struct nd_encoder encoder;
-  CHECK(nd_encoder_open(&encoder, "libx264", 320, 240, 60, 23,
+  struct nd_encoder_rate rate = {
+      argc == 2 ? ND_RATE_BANDWIDTH : ND_RATE_QP, 23, ND_DEFAULT_BITRATE_KBPS};
+  CHECK(nd_encoder_open(&encoder, "libx264", 320, 240, 60, &rate,
                          AV_PIX_FMT_YUV420P, 1) >= 0);
   AVFrame *frame = av_frame_alloc();
   AVPacket *encoded = av_packet_alloc();
