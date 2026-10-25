@@ -9,6 +9,7 @@ enum NDProtocol {
     static let authSize: Int = 32
     static let nameMax: Int = 64
     static let udpPayloadMax: Int = 1472
+    static let videoQueueCapacity: Int = 3
 }
 enum ControlFlags {
     static let wantInput: UInt32 = 1
@@ -19,6 +20,7 @@ enum ControlFlags {
     static let networkTest: UInt32 = 16
     static let powerInfo: UInt32 = 32
     static let touchscreen: UInt32 = 64
+    static let predictedVideo: UInt32 = 128
 }
 enum VideoCodecs {
     static let h264: UInt32 = 1

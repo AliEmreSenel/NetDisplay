@@ -37,6 +37,7 @@ struct host_cfg {
   int input_enabled;
   int power_devices;
   struct nd_encoder_rate rate;
+  unsigned keyframe_interval;
   uint16_t video_codec; /* 0=auto */
   int max_clients;
   int max_displays_per_client;
@@ -58,6 +59,7 @@ static void cfg_defaults(struct host_cfg *c) {
   c->input_enabled = 0;
   c->power_devices = 1;
   c->rate = (struct nd_encoder_rate){ND_RATE_QP, 24, ND_DEFAULT_BITRATE_KBPS};
+  c->keyframe_interval = ND_DEFAULT_KEYFRAME_INTERVAL;
   c->max_clients = 8;
   c->max_displays_per_client = NDC_MAX_DISPLAYS;
   c->max_width = 8192;
@@ -106,6 +108,12 @@ static void load_cfg(const char *path, struct host_cfg *c) {
       if (nd_bitrate_kbps_parse(v, &c->rate.bitrate_kbps) < 0) {
         fprintf(stderr, "bitrate_kbps must be 1..%d in %s\n",
                 ND_MAX_BITRATE_KBPS, path);
+        exit(2);
+      }
+    } else if (!strcmp(k, "keyframe_interval")) {
+      if (nd_keyframe_interval_parse(v, &c->keyframe_interval) < 0) {
+        fprintf(stderr, "keyframe_interval must be 1..%u in %s\n",
+                ND_MAX_KEYFRAME_INTERVAL, path);
         exit(2);
       }
     } else if (!strcmp(k, "video_codec")) {
@@ -525,6 +533,7 @@ struct server_stream {
   uint64_t stream_id;
   int port, width, height, refresh_hz;
   uint16_t video_codec;
+  unsigned keyframe_interval;
   char connector[NDC_NAME_MAX];
   char output[NDC_NAME_MAX];
   char encoder_name[64];
@@ -550,6 +559,8 @@ static pid_t spawn_builtin_sender(const struct host_cfg *cfg, const char *peer,
   enum { CHILD_KEY_FD = 196 };
   char portbuf[16], qpbuf[16], widthbuf[16], heightbuf[16], refreshbuf[16];
   char sessionbuf[32], encryptedbuf[8], keyfdbuf[16], codecbuf[16], bitratebuf[16];
+  char intervalbuf[16];
+  snprintf(intervalbuf, sizeof(intervalbuf), "%u", st->keyframe_interval);
   snprintf(portbuf, sizeof(portbuf), "%d", st->port);
   snprintf(qpbuf, sizeof(qpbuf), "%d", cfg->rate.qp);
   snprintf(bitratebuf, sizeof(bitratebuf), "%d", cfg->rate.bitrate_kbps);
@@ -578,6 +589,7 @@ static pid_t spawn_builtin_sender(const struct host_cfg *cfg, const char *peer,
       (char *)st->encoder_name,
       cfg->rate.mode == ND_RATE_QP ? (char *)"qp" : (char *)"bandwidth",
       bitratebuf,
+      intervalbuf,
       NULL,
   };
 
@@ -794,8 +806,9 @@ static void *session_main(void *opaque) {
     int usable = 1;
     for (unsigned i = 0; i < count; i++) {
       struct server_stream *st = &streams[i];
+      st->keyframe_interval = (requested & NDC_FLAG_PREDICTED_VIDEO) ? cfg->keyframe_interval : 1;
       if (nd_video_choose_encoder(candidate_codec, st->width, st->height,
-                                  st->refresh_hz, &cfg->rate,
+                                  st->refresh_hz, st->keyframe_interval, &cfg->rate,
                                   selected_encoders[i],
                                   sizeof(selected_encoders[i])) < 0) {
         usable = 0;
@@ -858,6 +871,7 @@ static void *session_main(void *opaque) {
       .flags = htonl((input_allowed ? NDC_FLAG_INPUT_ALLOWED : 0) |
                      (touch >= 0 ? NDC_FLAG_TOUCHSCREEN : 0) |
                      (requested & NDC_FLAG_NETWORK_TEST) |
+                     (cfg->keyframe_interval > 1 ? requested & NDC_FLAG_PREDICTED_VIDEO : 0) |
                      (cfg->power_devices ? requested & NDC_FLAG_POWER_INFO : 0) |
                      (encrypted ? NDC_FLAG_FRAME_ENCRYPT : 0)),
       .display_count = htons((uint16_t)count),
@@ -997,18 +1011,20 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && !strcmp(argv[1], "--derive-password-key"))
     return derive_password_key_cli();
-  if ((argc == 14 || argc == 16) && !strcmp(argv[1], "--video-sender")) {
+  if ((argc == 14 || argc == 16 || argc == 17) && !strcmp(argv[1], "--video-sender")) {
     struct nd_encoder_rate rate = {ND_RATE_QP, atoi(argv[5]), ND_DEFAULT_BITRATE_KBPS};
-    if (argc == 16 &&
-        (nd_rate_control_parse(argv[14], &rate.mode) < 0 ||
-         nd_bitrate_kbps_parse(argv[15], &rate.bitrate_kbps) < 0)) {
-      fprintf(stderr, "invalid built-in video sender rate control\n");
+    unsigned interval = 1;
+    if ((argc == 17 && nd_keyframe_interval_parse(argv[16], &interval) < 0) ||
+        (argc >= 16 &&
+         (nd_rate_control_parse(argv[14], &rate.mode) < 0 ||
+          nd_bitrate_kbps_parse(argv[15], &rate.bitrate_kbps) < 0))) {
+      fprintf(stderr, "invalid built-in video sender rate control/keyframe interval\n");
       return 2;
     }
     return nd_video_sender_run(argv[2], argv[3], atoi(argv[4]), &rate,
                                atoi(argv[6]), atoi(argv[7]), atoi(argv[8]),
                                strtoull(argv[9], NULL, 10), atoi(argv[10]),
-                               atoi(argv[11]), (uint16_t)atoi(argv[12]), argv[13]);
+                               atoi(argv[11]), (uint16_t)atoi(argv[12]), argv[13], interval);
   }
 
   if (argc != 2) {

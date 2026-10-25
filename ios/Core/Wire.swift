@@ -95,6 +95,7 @@ enum Wire {
         var w = ByteWriter()
         // Touch is an optional v6 extension; old hosts do not acknowledge it.
         let flags = (encrypt ? ControlFlags.frameEncrypt : 0)
+            | ControlFlags.predictedVideo
             | (haveKey ? ControlFlags.authRequired : 0)
             | (touch ? ControlFlags.wantInput | ControlFlags.touchscreen : 0)
         w.u32(flags); w.u16(1); w.u16(0)

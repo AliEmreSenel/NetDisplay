@@ -50,15 +50,16 @@ with tempfile.TemporaryDirectory() as tmp:
             with connect(port) as s:
                 hello(s);assert receive(s)[0]==9
                 send(s,10,b'\0'*32);assert receive(s)[0]==14, 'wrong key must be rejected'
-            for width,success in [(322,False),(320,True)]:
+            for width,success,predicted in [(322,False,False),(320,True,False),(320,True,True)]:
                 with connect(port) as s:
-                    cn=hello(s);kind,ch=receive(s);assert kind==9
+                    cn=hello(s,6 | (128 if predicted else 0));kind,ch=receive(s);assert kind==9
                     sn=ch[4:];send(s,10,proof(b'client',cn,sn));kind,answer=receive(s)
                     assert kind==10 and answer==proof(b'server',cn,sn),'mutual authentication'
                     send(s,11,struct.pack('!IHHHH64s',1,width,240,60,0,b'iphone'))
                     kind,data=receive(s)
                     if not success:assert kind==14;continue
-                    assert kind==2 and struct.unpack('!IHH',data)==(6,1,1)
+                    enabled=predicted and int(os.environ.get('NETDISPLAY_VR_KEYFRAME_INTERVAL','3'))>1
+                    assert kind==2 and struct.unpack('!IHH',data)==(6 | (128 if enabled else 0),1,1)
                     kind,data=receive(s);assert kind==12
                     display,session,video,w,h,fps,name=struct.unpack('!IQHHHH64s',data)
                     assert (display,w,h,fps)==(1,320,240,60) and session

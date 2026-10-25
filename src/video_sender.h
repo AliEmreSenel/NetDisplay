@@ -9,5 +9,5 @@ int nd_video_sender_run(const char *output_name, const char *receiver_ip,
                         int width, int height,
                         int refresh_hz, uint64_t wire_session,
                         int encrypted, int key_fd, uint16_t video_codec,
-                        const char *encoder_name);
+                        const char *encoder_name, unsigned keyframe_interval);
 #endif

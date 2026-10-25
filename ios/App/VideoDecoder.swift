@@ -4,12 +4,14 @@ import VideoToolbox
 import CoreMedia
 import CoreVideo
 
-/// One pending compressed access unit, one synchronous VT decode in progress.
-/// No temporal processing and no FIFO of old compressed frames.
+/// Bounded access-unit queue, one synchronous VT decode in progress.
+/// Decode dependencies in order and display only the newest available image.
 final class VideoDecoder {
     private let queue = DispatchQueue(label: "netdisplay.decode", qos: .userInteractive)
     private let lock = NSLock()
-    private var pending: EncodedFrame?
+    private var pending: [EncodedFrame] = []
+    private var waitingKeyframe = true
+    private var chain = nd_decode_chain()
     private var running = false, stopped = false
     private var vt: VTDecompressionSession?
     private var format: CMVideoFormatDescription?
@@ -29,8 +31,19 @@ final class VideoDecoder {
     func submit(_ frame: EncodedFrame) {
         lock.lock()
         guard !stopped else { lock.unlock(); return }
-        if pending != nil { diagnostics.update { $0.decoderReplaced += 1 } }
-        pending = frame
+        if frame.keyframe {
+            let dropped = pending.count
+            pending.removeAll(keepingCapacity: true)
+            waitingKeyframe = false
+            diagnostics.update { $0.decoderReplaced += UInt64(dropped) }
+        } else if waitingKeyframe || pending.count == NDProtocol.videoQueueCapacity {
+            let dropped = pending.count + 1
+            pending.removeAll(keepingCapacity: true)
+            waitingKeyframe = true
+            diagnostics.update { $0.decoderReplaced += UInt64(dropped) }
+            lock.unlock(); return
+        }
+        pending.append(frame)
         let schedule = !running
         running = true
         lock.unlock()
@@ -39,21 +52,22 @@ final class VideoDecoder {
     private func drain() {
         while true {
             lock.lock()
-            guard !stopped, let frame = pending else {
-                running = false; pending = nil; lock.unlock(); return
+            guard !stopped, !pending.isEmpty else {
+                running = false; pending.removeAll(); lock.unlock(); return
             }
-            pending = nil; lock.unlock()
+            let frame = pending.removeFirst(); lock.unlock()
             autoreleasepool {
                 do { try decode(frame) }
                 catch {
                     diagnostics.update { $0.decodeErrors += 1; $0.lastError = error.localizedDescription }
                     needsRandomAccess = true
+                    chain.valid = 0
                 }
             }
         }
     }
     func stop() {
-        lock.lock(); stopped = true; pending = nil; lock.unlock()
+        lock.lock(); stopped = true; pending.removeAll(); lock.unlock()
         queue.async { [weak self] in self?.invalidate() }
     }
     private func invalidate() {
@@ -121,8 +135,13 @@ final class VideoDecoder {
         let start = nd_ios_now_ns()
         let parsed = try AnnexBFrame(input.bytes, hevc: hevc)
         try configureIfNeeded(parsed.parameterSets)
-        guard parsed.hasPicture, let session = vt, let format = format else { return }
-        if needsRandomAccess && !parsed.randomAccess { return }
+        guard parsed.hasPicture, let session = vt, let format = format else {
+            chain.valid = 0; needsRandomAccess = true; return
+        }
+        if needsRandomAccess && !parsed.randomAccess { chain.valid = 0; return }
+        guard nd_decode_chain_accept(&chain, input.sequence, input.reference, input.keyframe ? 1 : 0) != 0 else {
+            needsRandomAccess = true; return
+        }
         let size = parsed.avcc.count
         var block: CMBlockBuffer?
         var result = CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault,
@@ -142,9 +161,14 @@ final class VideoDecoder {
             sampleTimingArray: &timing, sampleSizeEntryCount: 1, sampleSizeArray: &sampleSize,
             sampleBufferOut: &sample)
         guard result == noErr, let sample = sample else { throw NDError.message("Create video sample: \(result)") }
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true) as? [NSMutableDictionary],
+           let attachment = attachments.first {
+            attachment[kCMSampleAttachmentKey_NotSync as String] = !parsed.randomAccess
+            attachment[kCMSampleAttachmentKey_DependsOnOthers as String] = !input.keyframe
+        }
         var delivered = false
         // Both decode flags clear: output is delivered before this call returns.
-        // This makes the one-slot pending-frame policy meaningful at the decoder.
+        // Required references finish decoding before the next access unit.
         result = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [], infoFlagsOut: nil) {
             [weak self] status, _, image, _, _ in
             guard let self = self else { return }
@@ -152,12 +176,16 @@ final class VideoDecoder {
                 self.diagnostics.update { $0.lastError = "Hardware decode callback: \(status)" }; return
             }
             let now = nd_ios_now_ns()
-            self.frames.publish(DecodedFrame(pixels: image, sequence: input.sequence,
-                firstPacketNS: input.firstNS, decodedNS: now), generation: self.generation)
+            self.lock.lock(); let present = self.pending.isEmpty && !self.stopped; self.lock.unlock()
+            if present {
+                self.frames.publish(DecodedFrame(pixels: image, sequence: input.sequence,
+                    firstPacketNS: input.firstNS, decodedNS: now), generation: self.generation)
+            }
             self.diagnostics.update { $0.decoded += 1; $0.decodeMS = Double(now - start) / 1e6 }
             delivered = true
         }
         guard result == noErr else { throw NDError.message("Hardware decode: \(result)") }
         needsRandomAccess = !delivered
+        if !delivered { chain.valid = 0 }
     }
 }

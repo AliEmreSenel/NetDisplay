@@ -14,6 +14,7 @@ PACKAGE = Path(__file__).resolve().parent
 STATE = PACKAGE / 'installation.json'
 CONFIG = PACKAGE / 'session.json'
 DEFAULT_BITRATE_KBPS = 20000
+DEFAULT_KEYFRAME_INTERVAL = 3
 MAX_BITRATE_KBPS = 1000000
 
 def validate_rate(backend):
@@ -21,6 +22,9 @@ def validate_rate(backend):
         raise ValueError('rate-control must be qp or bandwidth')
     qp = backend.get('qp', 28)
     bitrate = backend.get('bitrate_kbps', DEFAULT_BITRATE_KBPS)
+    interval = backend.get('keyframe_interval', DEFAULT_KEYFRAME_INTERVAL)
+    if type(interval) is not int or not 1 <= interval <= 60:
+        raise ValueError('keyframe-interval must be 1..60')
     if type(qp) is not int or not 0 <= qp <= 51:
         raise ValueError('QP must be 0..51')
     if type(bitrate) is not int or not 1 <= bitrate <= MAX_BITRATE_KBPS:
@@ -62,7 +66,8 @@ def configure(a):
         raise ValueError('Use even dimensions up to 4096x2160, and 30–120 fps')
     if not all(1 <= p <= 65535 for p in [a.control_port,a.video_port,a.motion_port]): raise ValueError('Invalid port')
     if not 0.3 <= a.head_height <= 2.5: raise ValueError('head-height must be 0.3..2.5 m')
-    rate = dict(qp=a.qp, rate_control=a.rate_control, bitrate_kbps=a.bitrate_kbps)
+    rate = dict(qp=a.qp, rate_control=a.rate_control, bitrate_kbps=a.bitrate_kbps,
+                keyframe_interval=a.keyframe_interval)
     validate_rate(rate)
     private=PACKAGE/'private';private.mkdir(exist_ok=True,mode=0o700);private.chmod(0o700)
     token(a.video_key_file,private/'video.key');token(a.motion_token_file,private/'motion.key')
@@ -135,6 +140,7 @@ def run():
     os.environ['NETDISPLAY_VR_QP'] = str(config.get('qp',28))
     os.environ['NETDISPLAY_VR_RATE_CONTROL'] = config.get('rate_control','qp')
     os.environ['NETDISPLAY_VR_BITRATE_KBPS'] = str(config.get('bitrate_kbps',DEFAULT_BITRATE_KBPS))
+    os.environ['NETDISPLAY_VR_KEYFRAME_INTERVAL'] = str(config.get('keyframe_interval',DEFAULT_KEYFRAME_INTERVAL))
     os.execv(args[0],args)
 
 def status():
@@ -155,7 +161,7 @@ def tune(a):
     path=PACKAGE/'driver/resources/settings/default.vrsettings'
     settings=json.loads(path.read_text())
     hmd=settings['driver_netdisplay_vr']; backend=config['backend']
-    for key in ['width','height','fps','qp','encoder','rate_control','bitrate_kbps']:
+    for key in ['width','height','fps','qp','encoder','rate_control','bitrate_kbps','keyframe_interval']:
         value=getattr(a,key,None)
         if value is not None: backend[key]=value
     if backend['width'] % 2 or backend['height'] % 2 or not 2 <= backend['width'] <= 4096 or not 2 <= backend['height'] <= 2160 or not 30 <= backend['fps'] <= 120:
@@ -183,11 +189,13 @@ def main():
     c.add_argument('--video-key-file',required=True);c.add_argument('--motion-token-file',required=True);c.add_argument('--auth',choices=['key','password'],default='key');c.add_argument('--encoder',choices=['h264_nvenc','hevc_nvenc','libx264'],default='hevc_nvenc')
     c.add_argument('--qp',type=int,default=28);c.add_argument('--head-height',type=float,default=1.6)
     c.add_argument('--rate-control',choices=['qp','bandwidth'],default='qp')
+    c.add_argument('--keyframe-interval',type=int,default=DEFAULT_KEYFRAME_INTERVAL,help='1=all-intra, 2=IP, 3=IPP (default); range 1..60')
     c.add_argument('--bitrate-kbps',type=int,default=DEFAULT_BITRATE_KBPS,help='Per-stream peak encoded-video rate in decimal kbit/s; used by bandwidth mode')
     for command in ['install','restore','run','status','launch']:sub.add_parser(command)
     t=sub.add_parser('tune')
     for key in ['width','height','fps','qp']:t.add_argument('--'+key,type=int)
     t.add_argument('--rate-control',choices=['qp','bandwidth'])
+    t.add_argument('--keyframe-interval',type=int,help='1=all-intra, 2=IP, 3=IPP; range 1..60')
     t.add_argument('--bitrate-kbps',type=int,help='Per-stream peak encoded-video rate in decimal kbit/s; used by bandwidth mode')
     t.add_argument('--head-height',type=float)
     t.add_argument('--encoder',choices=['h264_nvenc','hevc_nvenc','libx264'])

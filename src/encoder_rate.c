@@ -50,7 +50,7 @@ int nd_encoder_rate_apply(AVCodecContext *ctx,
   ctx->global_quality = 0;
   ctx->bit_rate = ctx->rc_min_rate = ctx->rc_max_rate = 0;
   ctx->rc_buffer_size = ctx->rc_initial_buffer_occupancy = 0;
-  /* All submitted frames are intra; use the requested QP without a hidden
+  /* Use the requested QP without a hidden
    * I-frame quantizer multiplier. QP scales still differ between codecs. */
   ctx->i_quant_factor = ctx->b_quant_factor = 1.0f;
   ctx->i_quant_offset = ctx->b_quant_offset = 0.0f;
@@ -88,7 +88,9 @@ int nd_encoder_rate_apply(AVCodecContext *ctx,
       return ret;
     if (bandwidth)
       return av_opt_set_int(ctx->priv_data, "filler_data", 0, 0);
-    return av_opt_set_int(ctx->priv_data, "qp_i", rate->qp, 0);
+    ret = av_opt_set_int(ctx->priv_data, "qp_i", rate->qp, 0);
+    if (ret < 0) return ret;
+    return av_opt_set_int(ctx->priv_data, "qp_p", rate->qp, 0);
   }
   if (strstr(name, "_vaapi")) {
     ret = av_opt_set(ctx->priv_data, "rc_mode", bandwidth ? "VBR" : "CQP", 0);

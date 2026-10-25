@@ -5,6 +5,8 @@ import Darwin
 struct EncodedFrame {
     let bytes: Data
     let sequence: UInt32
+    let reference: UInt32
+    let keyframe: Bool
     let firstNS: UInt64
     let completeNS: UInt64
 }
@@ -52,7 +54,8 @@ final class UDPReceiver {
                     let s = nd_ios_assembler_stats(assembly)
                     guard let bytes = nd_ios_assembler_bytes(assembly) else { continue }
                     self.onFrame(EncodedFrame(bytes: Data(bytes: bytes, count: Int(s.frame_bytes)),
-                        sequence: s.sequence, firstNS: s.first_ns, completeNS: s.complete_ns))
+                        sequence: s.sequence, reference: s.reference, keyframe: s.keyframe != 0,
+                        firstNS: s.first_ns, completeNS: s.complete_ns))
                     self.diagnostics.update {
                         $0.assemblyMS = Double(s.complete_ns - s.first_ns) / 1e6
                         $0.lastVideoNS = s.complete_ns

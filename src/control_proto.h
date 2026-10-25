@@ -24,6 +24,8 @@
 #define NDC_FLAG_POWER_INFO (1u << 5)
 /* Optional v6 extension: direct multitouch, acknowledged only when available. */
 #define NDC_FLAG_TOUCHSCREEN (1u << 6)
+/* Optional v6 extension: bounded prediction-aware decode and ND02 video. */
+#define NDC_FLAG_PREDICTED_VIDEO (1u << 7)
 /* Compatibility name for protocol-v5 implementations predating passwords. */
 #define NDC_FLAG_HAVE_PSK NDC_FLAG_AUTH_REQUIRED
 

@@ -130,10 +130,6 @@ static void configure_encoder_context(AVCodecContext *c, enum AVPixelFormat fmt,
   c->time_base = (AVRational){1, fps};
   c->framerate = (AVRational){fps, 1};
   c->pix_fmt = fmt;
-  /* Some NVENC generations reject GOP=1 even with B-frames disabled.
-   * Callers explicitly mark every submitted frame I, so a GOP size
-   * of 2 satisfies those drivers without introducing inter-frame dependency. */
-  c->gop_size = 2;
   c->max_b_frames = 0;
   c->refs = 1;
   c->thread_count = 2;
@@ -141,7 +137,7 @@ static void configure_encoder_context(AVCodecContext *c, enum AVPixelFormat fmt,
   c->color_primaries = AVCOL_PRI_BT709;
   c->color_trc = AVCOL_TRC_BT709;
   c->colorspace = AVCOL_SPC_BT709;
-  c->flags |= AV_CODEC_FLAG_LOW_DELAY;
+  c->flags |= AV_CODEC_FLAG_LOW_DELAY | AV_CODEC_FLAG_CLOSED_GOP;
 }
 
 static void encoder_open_options(const char *encoder_name,
@@ -158,14 +154,22 @@ static void encoder_open_options(const char *encoder_name,
       av_dict_set(opts, "aud", "1", 0);
   } else if (strstr(encoder_name, "_qsv")) {
     av_dict_set(opts, "preset", "veryfast", 0);
+    av_dict_set(opts, "async_depth", "1", 0);
+    if (!strstr(encoder_name, "av1_"))
+      av_dict_set(opts, "forced_idr", "1", 0);
     if (!strcmp(encoder_name, "h264_qsv"))
       av_dict_set(opts, "look_ahead", "0", 0);
   } else if (strstr(encoder_name, "_amf")) {
+    if (!strstr(encoder_name, "av1_"))
+      av_dict_set(opts, "forced_idr", "1", 0);
     av_dict_set(opts, "usage", "ultralowlatency", 0);
     av_dict_set(opts, "quality", "speed", 0);
+  } else if (strstr(encoder_name, "_vaapi")) {
+    av_dict_set(opts, "async_depth", "1", 0);
   } else if (!strcmp(encoder_name, "libx264") || !strcmp(encoder_name, "libx265")) {
     av_dict_set(opts, "preset", "ultrafast", 0);
     av_dict_set(opts, "tune", "zerolatency", 0);
+    av_dict_set(opts, "forced-idr", "1", 0);
   }
 }
 
@@ -235,12 +239,38 @@ void nd_encoder_close(struct nd_encoder *e) {
   av_buffer_unref(&e->device);
 }
 
+int nd_keyframe_interval_parse(const char *value, unsigned *interval) {
+  if (!value || !*value || !interval) return -1;
+  unsigned n = 0;
+  for (const char *p = value; *p; p++) {
+    if (*p < '0' || *p > '9') return -1;
+    n = n * 10u + (unsigned)(*p - '0');
+    if (n > ND_MAX_KEYFRAME_INTERVAL) return -1;
+  }
+  if (!n) return -1;
+  *interval = n;
+  return 0;
+}
+
+void nd_encoder_prepare_frame(struct nd_encoder *e, AVFrame *frame, int force) {
+  if (force || e->frames_since_keyframe >= e->keyframe_interval) {
+    frame->pict_type = AV_PICTURE_TYPE_I;
+    e->frames_since_keyframe = 1;
+  } else {
+    frame->pict_type = AV_PICTURE_TYPE_P;
+    e->frames_since_keyframe++;
+  }
+}
+
 int nd_encoder_open(struct nd_encoder *e, const char *name, int width,
-                     int height, int fps, const struct nd_encoder_rate *rate,
+                     int height, int fps, unsigned keyframe_interval,
+                     const struct nd_encoder_rate *rate,
                      enum AVPixelFormat preferred, int quiet) {
   *e = (struct nd_encoder){.sw_format = AV_PIX_FMT_NONE};
-  if (!name || width <= 0 || height <= 0 || fps <= 0 || !nd_encoder_rate_valid(rate))
+  if (!name || width <= 0 || height <= 0 || fps <= 0 || !keyframe_interval ||
+      keyframe_interval > ND_MAX_KEYFRAME_INTERVAL || !nd_encoder_rate_valid(rate))
     return -1;
+  e->keyframe_interval = e->frames_since_keyframe = keyframe_interval;
   const struct encoder_candidate *candidate = find_encoder_candidate(name);
   /* Software fallback is explicit; hardware negotiation never selects it. */
   if (!candidate && strcmp(name, "libx264") && strcmp(name, "libx265")) return -1;
@@ -250,6 +280,9 @@ int nd_encoder_open(struct nd_encoder *e, const char *name, int width,
   int ret = setup_encoder_input(e->context, codec, candidate, width, height, fps,
                                 preferred, &e->device, &e->frames, &e->sw_format);
   AVDictionary *opts = NULL;
+  /* Some NVENC generations reject GOP=1. Explicit I-frame submission still
+   * makes interval=1 independent with an advertised GOP size of two. */
+  e->context->gop_size = keyframe_interval == 1 ? 2 : (int)keyframe_interval;
   if (ret == 0)
     ret = nd_encoder_rate_apply(e->context, rate, fps);
   if (ret == 0) {
@@ -274,14 +307,15 @@ int nd_encoder_open(struct nd_encoder *e, const char *name, int width,
 }
 
 int nd_video_choose_encoder(uint16_t codec, int width, int height, int fps,
+                            unsigned keyframe_interval,
                             const struct nd_encoder_rate *rate,
                             char *name, size_t name_size) {
   if (!ndc_codec_bit(codec) || !name || !name_size) return -1;
   for (size_t i = 0; i < sizeof(encoder_candidates) / sizeof(encoder_candidates[0]); i++) {
     if (encoder_candidates[i].codec != codec) continue;
     struct nd_encoder e;
-    if (nd_encoder_open(&e, encoder_candidates[i].name, width, height, fps, rate,
-                         AV_PIX_FMT_NONE, 1) >= 0) {
+    if (nd_encoder_open(&e, encoder_candidates[i].name, width, height, fps,
+                         keyframe_interval, rate, AV_PIX_FMT_NONE, 1) >= 0) {
       nd_encoder_close(&e);
       snprintf(name, name_size, "%s", encoder_candidates[i].name);
       return 0;

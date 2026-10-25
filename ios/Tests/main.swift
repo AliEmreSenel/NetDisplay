@@ -17,7 +17,7 @@ check(try r.f32() == 1.25, "float")
 rejects("short read") { _ = try r.u16() }
 let hello = Wire.hello(nonce: Data(0..<16), encrypt: true, haveKey: true, codecs: 1)
 check(hello.count == 28, "v6 HELLO size")
-check(Array(hello.prefix(12)) == [0,0,0,6,0,1,0,0,0,0,0,1], "HELLO capabilities and byte order")
+check(Array(hello.prefix(12)) == [0,0,0,134,0,1,0,0,0,0,0,1], "HELLO capabilities and byte order")
 let packet = ControlMessage(.hello, hello).encoded
 let header = try ControlMessage.decodeHeader(Data(packet.prefix(12)))
 check(header.type == 1 && header.count == 28, "control header")
@@ -58,7 +58,7 @@ check(motion.body.count == 96, "motion body size")
 check(Array(motion.body.prefix(12)) == [78,68,77,49,0,1,0,1,0,0,0,7], "motion header bytes")
 if CommandLine.arguments.count > 1 { try motion.body.write(to: URL(fileURLWithPath: CommandLine.arguments[1])) }
 let touchHello = Wire.hello(nonce: Data(repeating: 0, count: 16), encrypt: false, haveKey: false, codecs: 1, touch: true)
-check(Array(touchHello.prefix(4)) == [0, 0, 0, 65], "touch capability request")
+check(Array(touchHello.prefix(4)) == [0, 0, 0, 193], "touch and prediction capability request")
 check(TouchWire.position(x: 0, y: 0, width: 200, height: 100, sourceWidth: 100, sourceHeight: 100, clamp: false) == nil, "letterbox taps ignored")
 let center = TouchWire.position(x: 100, y: 50, width: 200, height: 100, sourceWidth: 100, sourceHeight: 100, clamp: false)!
 check(center.0 == 32768 && center.1 == 32768, "touch maps to video center")

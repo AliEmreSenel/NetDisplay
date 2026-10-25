@@ -30,6 +30,11 @@ qp=24
 # and bursts. There is no automatic response to network conditions yet.
 bitrate_kbps=20000
 
+# Frames between independently decodable keyframes: 1=all-intra, 2=IP, 3=IPP.
+# Range 1..60; larger values can save bandwidth but increase loss recovery time.
+# Older receivers automatically use all-intra. Restart the server after changing.
+keyframe_interval=3
+
 # A password key makes interactive clients prompt when they connect. Generate
 # it by running `netdisplay-server --derive-password-key`; the password itself
 # is neither stored here nor sent over the network.

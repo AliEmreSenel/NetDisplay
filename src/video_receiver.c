@@ -789,7 +789,7 @@ out:
 }
 
 static int decode_one(AVCodecContext *dec, const uint8_t *data, uint32_t size,
-                      uint32_t seq, AVFrame *hw, AVFrame *sw) {
+                      uint32_t seq, AVFrame *hw, AVFrame *sw, int present) {
   AVPacket pkt = {0};
   pkt.data = (uint8_t *)data;
   pkt.size = (int)size;
@@ -818,6 +818,12 @@ static int decode_one(AVCodecContext *dec, const uint8_t *data, uint32_t size,
             hw->format);
     return -1;
   }
+  if ((hw->flags & AV_FRAME_FLAG_CORRUPT) || hw->decode_error_flags) {
+    avcodec_flush_buffers(dec);
+    return -1;
+  }
+  /* References still reach the decoder when only the newest image is shown. */
+  if (!present) return 1;
 
   av_frame_unref(sw);
   enum AVPixelFormat transfer_format = preferred_transfer_format(hw);
@@ -845,7 +851,7 @@ static int seq_newer(uint32_t a, uint32_t b) { return (int32_t)(a - b) > 0; }
 
 struct rx_ctx {
   int sock;
-  struct nd_latest *mailbox;
+  struct nd_frame_queue *mailbox;
   uint8_t *assembly_buf;
   struct nd_rx_stats *stats;
   int encrypted;
@@ -863,12 +869,14 @@ static void *rx_thread_main(void *opaque) {
     if (n < 0) { perror("recv"); return NULL; }
     if (nd_frame_receive(&assembly, rx->stats, rx->assembly_buf, datagram,
                           (size_t)n, rx->encrypted ? rx->key : NULL)) {
-      memset(rx->assembly_buf + assembly.size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+      memset(rx->assembly_buf + assembly.offset + assembly.size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
       struct nd_frame_slot frame = {.buffer = rx->assembly_buf,
           .size = assembly.size, .seq = assembly.seq, .session = assembly.session,
-          .first_ns = assembly.first_ns, .complete_ns = assembly.complete_ns};
-      if (nd_latest_publish(rx->mailbox, &frame))
-        atomic_fetch_add(&rx->stats->latest_overwrite, 1);
+          .first_ns = assembly.first_ns, .complete_ns = assembly.complete_ns,
+          .offset = assembly.offset, .reference = assembly.reference,
+          .keyframe = assembly.keyframe};
+      unsigned dropped = nd_frame_queue_publish(rx->mailbox, &frame);
+      atomic_fetch_add(&rx->stats->latest_overwrite, dropped);
       rx->assembly_buf = frame.buffer;
     }
   }
@@ -1004,22 +1012,22 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
   if (getsockopt(s, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &sl) == 0)
     fprintf(stderr, "UDP SO_RCVBUF actual=%d bytes\n", rcvbuf);
 
-  /* Three compressed buffers, but never a queue:
-   *   assembly_buf: RX is currently filling it
-   *   latest_buf:   newest completed intra frame waiting for decode
-   *   decode_buf:   decoder currently owns it
-   * Pointer swaps make publication zero-copy. */
+  /* One assembly buffer, at most three pending access units, and one decoder
+   * buffer. Pointer swaps preserve references without a growing video FIFO. */
   uint8_t *assembly_buf =
       av_malloc((size_t)ND_MAX_WIRE_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
-  uint8_t *latest_buf =
-      av_malloc((size_t)ND_MAX_WIRE_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
+  uint8_t *pending_buf[ND_VIDEO_QUEUE_CAPACITY];
+  for (unsigned i = 0; i < ND_VIDEO_QUEUE_CAPACITY; i++) {
+    pending_buf[i] = av_malloc((size_t)ND_MAX_WIRE_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!pending_buf[i]) die("av_malloc pending frame");
+  }
   uint8_t *decode_buf =
       av_malloc((size_t)ND_MAX_WIRE_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
-  if (!assembly_buf || !latest_buf || !decode_buf)
+  if (!assembly_buf || !decode_buf)
     die("av_malloc compressed buffers");
 
-  struct nd_latest mailbox;
-  int mailbox_error = nd_latest_init(&mailbox, latest_buf);
+  struct nd_frame_queue mailbox;
+  int mailbox_error = nd_frame_queue_init(&mailbox, pending_buf);
   if (mailbox_error) { errno = mailbox_error; die("init latest frame"); }
 
   struct nd_rx_stats stats = {0};
@@ -1046,7 +1054,7 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
 
   fprintf(stderr,
           "listening port %d for %ux%u@%d codec=%s encryption=%s; RX runs continuously; "
-          "only newest complete intra frame is decoded\n",
+          "bounded prediction-aware decode, newest image displayed\n",
           port, width, height, refresh_hz, codec_name_from_wire(video_codec),
           encrypted ? "on" : "off");
 
@@ -1065,6 +1073,7 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
   uint64_t last_session = 0;
   uint32_t last_seq = 0;
   int have_last_seq = 0;
+  struct nd_decode_chain chain = {0};
 
   struct timespec stat0;
   clock_gettime(CLOCK_MONOTONIC, &stat0);
@@ -1078,7 +1087,7 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
 
   for (;;) {
     struct nd_frame_slot frame = {.buffer = decode_buf};
-    nd_latest_take(&mailbox, &frame, 1);
+    nd_frame_queue_take(&mailbox, &frame, 1);
     decode_buf = frame.buffer;
     uint32_t size = frame.size, seq = frame.seq;
     uint64_t session = frame.session;
@@ -1088,11 +1097,20 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
       if (delta > 1)
         skipped_before_decode += (unsigned long long)(delta - 1u);
     }
+    if (session != last_session) {
+      chain.valid = 0;
+      avcodec_flush_buffers(dec);
+    }
     last_session = session;
     last_seq = seq;
     have_last_seq = 1;
 
-    if (decode_one(dec, decode_buf, size, seq, hw, sw) == 0) {
+    if (!nd_decode_chain_accept(&chain, seq, frame.reference, frame.keyframe))
+      continue;
+    int decoded = decode_one(dec, decode_buf + frame.offset, size, seq, hw, sw,
+                              !nd_frame_queue_pending(&mailbox));
+    if (decoded < 0) chain.valid = 0;
+    if (decoded == 0) {
       pthread_mutex_lock(&display_control.mutex);
       int back = display_control.front ^ 1;
       copy_decoded_to_nv12(sw, &video[back], width, height);

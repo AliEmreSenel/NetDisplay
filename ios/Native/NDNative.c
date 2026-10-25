@@ -55,6 +55,8 @@ int nd_ios_assembler_feed(NDIOSAssembler *a, const uint8_t *p, size_t n) {
     if (result == 1) {
         a->stats.sequence = a->assembly.seq;
         a->stats.frame_bytes = a->assembly.size;
+        a->stats.reference = a->assembly.reference;
+        a->stats.keyframe = (uint32_t)a->assembly.keyframe;
         a->stats.first_ns = a->assembly.first_ns;
         a->stats.complete_ns = a->assembly.complete_ns;
     }
@@ -62,7 +64,7 @@ int nd_ios_assembler_feed(NDIOSAssembler *a, const uint8_t *p, size_t n) {
 }
 
 const uint8_t *nd_ios_assembler_bytes(const NDIOSAssembler *a) {
-    return a ? a->buffer : NULL;
+    return a ? a->buffer + a->assembly.offset : NULL;
 }
 NDIOSStats nd_ios_assembler_stats(const NDIOSAssembler *a) {
     return a ? a->stats : (NDIOSStats){0};

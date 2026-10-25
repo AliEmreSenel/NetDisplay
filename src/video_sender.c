@@ -279,7 +279,8 @@ static void alloc_capture_buffer(uint32_t format, uint32_t width,
 
 static void init_encoder(void) {
   if (nd_encoder_open(&encoder, selected_encoder, (int)stream_width,
-                       (int)stream_height, (int)stream_fps, &encoder_rate, capture_format, 0) < 0) {
+                       (int)stream_height, (int)stream_fps, encoder.keyframe_interval,
+                       &encoder_rate, capture_format, 0) < 0) {
     fprintf(stderr, "cannot open encoder '%s'\n", selected_encoder);
     exit(EXIT_FAILURE);
   }
@@ -317,7 +318,7 @@ static void init_encoder(void) {
 
   fprintf(
       stderr,
-      "%s via %s: %ux%u@%u transfer=%s encoder=%s capture=%s all-intra\n",
+      "%s via %s: %ux%u@%u transfer=%s encoder=%s capture=%s keyframe_interval=%u\n",
       ndc_codec_name(selected_codec), selected_encoder, stream_width,
       stream_height, stream_fps,
       av_get_pix_fmt_name(encoder_sw_format)
@@ -326,7 +327,7 @@ static void init_encoder(void) {
       av_get_pix_fmt_name(enc->pix_fmt) ? av_get_pix_fmt_name(enc->pix_fmt)
                                         : "?",
       av_get_pix_fmt_name(capture_format) ? av_get_pix_fmt_name(capture_format)
-                                          : "?");
+                                          : "?", encoder.keyframe_interval);
   if (encoder_rate.mode == ND_RATE_QP)
     fprintf(stderr, "rate-control=qp QP=%d\n", encoder_rate.qp);
   else
@@ -398,7 +399,7 @@ static int encode_and_publish(int y_invert) {
                 convert_frame->data, convert_frame->linesize) <= 0)
     return -1;
   convert_frame->pts = (int64_t)frame_pts++;
-  convert_frame->pict_type = AV_PICTURE_TYPE_I;
+  nd_encoder_prepare_frame(&encoder, convert_frame, nd_video_tx_take_keyframe_request(tx));
 
   int ret;
   if (encoder_uses_hw_frames) {
@@ -463,7 +464,8 @@ static void frame_ready(void *data, struct zwlr_screencopy_frame_v1 *frame,
   zwlr_screencopy_frame_v1_destroy(frame);
   stat_capture++;
 
-  (void)encode_and_publish(frame_y_invert);
+  if (encode_and_publish(frame_y_invert) < 0)
+    encoder.frames_since_keyframe = encoder.keyframe_interval;
 
   /* UDP runs independently.  Request the next compositor frame as soon as
    * the encoder has accepted this one; Ethernet serialization is no longer in
@@ -562,16 +564,18 @@ int nd_video_sender_run(const char *output_name, const char *ip, int port,
                         const struct nd_encoder_rate *rate,
                         int width, int height, int refresh_hz,
                         uint64_t wire_session, int encrypted, int key_fd,
-                        uint16_t video_codec, const char *encoder_name) {
+                        uint16_t video_codec, const char *encoder_name, unsigned keyframe_interval) {
   if (!output_name || !*output_name || !ip || !*ip || port <= 0 ||
       port > 65535 || !nd_encoder_rate_valid(rate) || width <= 0 ||
       width > UINT16_MAX || (width & 1) || height <= 0 || height > UINT16_MAX ||
       (height & 1) || refresh_hz <= 0 || refresh_hz > UINT16_MAX ||
-      !ndc_codec_bit(video_codec) || !encoder_name || !*encoder_name) {
+      !ndc_codec_bit(video_codec) || !encoder_name || !*encoder_name ||
+      !keyframe_interval || keyframe_interval > ND_MAX_KEYFRAME_INTERVAL) {
     fprintf(stderr, "invalid built-in video sender parameters\n");
     return 2;
   }
   encoder_rate = *rate;
+  encoder.keyframe_interval = keyframe_interval;
   selected_codec = video_codec;
   snprintf(selected_encoder, sizeof(selected_encoder), "%s", encoder_name);
   stream_width = (uint32_t)width;
@@ -588,7 +592,7 @@ int nd_video_sender_run(const char *output_name, const char *ip, int port,
   session_id = wire_session ? wire_session : make_session_id();
   seq_id = 0;
   tx = nd_video_tx_open(udp_fd, session_id, frame_encrypted ? frame_key : NULL,
-                        stream_fps);
+                        stream_fps, keyframe_interval > 1);
   explicit_bzero(frame_key, sizeof(frame_key));
   if (!tx)
     die("video transmitter");

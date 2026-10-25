@@ -84,7 +84,7 @@ static int send_probe(struct probe *p, unsigned direction) {
         uint32_t seq = stage * SAMPLES + sent++;
         uint64_t deadline = next < end ? next : end;
         s->sent_ns = nd_now_ns();
-        int r = nd_frame_send(p->fd, p->session, seq, p->data, size,
+        int r = nd_frame_send(p->fd, p->session, seq, p->data, size, -1,
                               key_for(p, direction * 2), p->scratch,
                               expired, &deadline, &tx);
         if (r != 0) aborted++;
@@ -235,7 +235,7 @@ static int hash_probe(struct probe *p, unsigned direction) {
     ack.service_ns = nd_hton64(nd_now_ns() - frame.complete_ns);
     uint64_t ack_deadline = nd_now_ns() + 1000000ull;
     struct nd_tx_stats tx = {0};
-    (void)nd_frame_send(p->fd, p->session, frame.seq, (uint8_t *)&ack, sizeof(ack),
+    (void)nd_frame_send(p->fd, p->session, frame.seq, (uint8_t *)&ack, sizeof(ack), -1,
                         key_for(p, direction * 2 + 1), p->scratch,
                         expired, &ack_deadline, &tx);
   }
