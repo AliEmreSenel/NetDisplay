@@ -58,7 +58,7 @@ check(motion.body.count == 96, "motion body size")
 check(Array(motion.body.prefix(12)) == [78,68,77,49,0,1,0,1,0,0,0,7], "motion header bytes")
 if CommandLine.arguments.count > 1 { try motion.body.write(to: URL(fileURLWithPath: CommandLine.arguments[1])) }
 let touchHello = Wire.hello(nonce: Data(repeating: 0, count: 16), encrypt: false, haveKey: false, codecs: 1, touch: true)
-check(Array(touchHello.prefix(4)) == [0, 0, 0, 65], "touch capability request")
+check(Array(touchHello.prefix(4)) == [0, 0, 0, 193], "touch and prediction capability request")
 check(TouchWire.position(x: 0, y: 0, width: 200, height: 100, sourceWidth: 100, sourceHeight: 100, clamp: false) == nil, "letterbox taps ignored")
 let center = TouchWire.position(x: 100, y: 50, width: 200, height: 100, sourceWidth: 100, sourceHeight: 100, clamp: false)!
 check(center.0 == 32768 && center.1 == 32768, "touch maps to video center")
