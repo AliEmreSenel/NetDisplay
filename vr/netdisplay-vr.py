@@ -13,6 +13,23 @@ import time
 PACKAGE = Path(__file__).resolve().parent
 STATE = PACKAGE / 'installation.json'
 CONFIG = PACKAGE / 'session.json'
+DEFAULT_BITRATE_KBPS = 20000
+MAX_BITRATE_KBPS = 1000000
+
+def validate_rate(backend):
+    if backend.get('rate_control', 'qp') not in ['qp', 'bandwidth']:
+        raise ValueError('rate-control must be qp or bandwidth')
+    qp = backend.get('qp', 28)
+    bitrate = backend.get('bitrate_kbps', DEFAULT_BITRATE_KBPS)
+    if type(qp) is not int or not 0 <= qp <= 51:
+        raise ValueError('QP must be 0..51')
+    if type(bitrate) is not int or not 1 <= bitrate <= MAX_BITRATE_KBPS:
+        raise ValueError(f'bitrate-kbps must be 1..{MAX_BITRATE_KBPS}')
+
+def rate_description(backend):
+    if backend.get('rate_control', 'qp') == 'bandwidth':
+        return f"bandwidth peak={backend.get('bitrate_kbps', DEFAULT_BITRATE_KBPS)} kbit/s"
+    return f"QP={backend.get('qp', 28)}"
 
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,12 +61,14 @@ def configure(a):
     if not (2 <= a.width <= 4096 and 2 <= a.height <= 2160 and a.width % 2 == 0 and a.height % 2 == 0 and 30 <= a.fps <= 120):
         raise ValueError('Use even dimensions up to 4096x2160, and 30–120 fps')
     if not all(1 <= p <= 65535 for p in [a.control_port,a.video_port,a.motion_port]): raise ValueError('Invalid port')
-    if not 0.3 <= a.head_height <= 2.5 or not 0 <= a.qp <= 51: raise ValueError('head-height must be 0.3..2.5 m and QP 0..51')
+    if not 0.3 <= a.head_height <= 2.5: raise ValueError('head-height must be 0.3..2.5 m')
+    rate = dict(qp=a.qp, rate_control=a.rate_control, bitrate_kbps=a.bitrate_kbps)
+    validate_rate(rate)
     private=PACKAGE/'private';private.mkdir(exist_ok=True,mode=0o700);private.chmod(0o700)
     token(a.video_key_file,private/'video.key');token(a.motion_token_file,private/'motion.key')
     settings=dict(enable=True,width=a.width,height=a.height,windowX=0,windowY=0,frequency=float(a.fps),ipd=.064,verticalFov=90.,motionPort=a.motion_port,bindAddress=a.bind,peerAddress=a.peer,tokenFile=str(private/'motion.key'),headHeight=a.head_height)
     write_json(PACKAGE/'driver/resources/settings/default.vrsettings',{'driver_netdisplay_vr':settings})
-    write_json(CONFIG,dict(steamvr_hmd_init_config=dict(eye_resolution_width=a.width//2,eye_resolution_height=a.height,refresh_rate=a.fps),backend=dict(bind=a.bind,peer=a.peer,control_port=a.control_port,video_port=a.video_port,width=a.width,height=a.height,fps=a.fps,key_file=str(private/'video.key'),auth=a.auth,encoder=a.encoder,qp=a.qp)))
+    write_json(CONFIG,dict(steamvr_hmd_init_config=dict(eye_resolution_width=a.width//2,eye_resolution_height=a.height,refresh_rate=a.fps),backend=dict(bind=a.bind,peer=a.peer,control_port=a.control_port,video_port=a.video_port,width=a.width,height=a.height,fps=a.fps,key_file=str(private/'video.key'),auth=a.auth,encoder=a.encoder,**rate)))
     print(f'VR configured: {a.width}x{a.height}@{a.fps}, phone {a.peer}, control port {a.control_port}.')
 
 def install():
@@ -108,11 +127,14 @@ def restore():
 
 def run():
     config=json.loads(CONFIG.read_text())['backend']
+    validate_rate(config)
     runtime=os.environ.get('XDG_RUNTIME_DIR')
     if not runtime:raise RuntimeError('XDG_RUNTIME_DIR is required')
     endpoint=Path(runtime)/'netdisplay-vr-ipc'
     args=[str(PACKAGE/'bin/netdisplay-vr-server')]+[str(config[k]) for k in ['bind','peer','control_port','video_port','width','height','fps','key_file','auth','encoder']]+[str(endpoint)]
     os.environ['NETDISPLAY_VR_QP'] = str(config.get('qp',28))
+    os.environ['NETDISPLAY_VR_RATE_CONTROL'] = config.get('rate_control','qp')
+    os.environ['NETDISPLAY_VR_BITRATE_KBPS'] = str(config.get('bitrate_kbps',DEFAULT_BITRATE_KBPS))
     os.execv(args[0],args)
 
 def status():
@@ -133,18 +155,18 @@ def tune(a):
     path=PACKAGE/'driver/resources/settings/default.vrsettings'
     settings=json.loads(path.read_text())
     hmd=settings['driver_netdisplay_vr']; backend=config['backend']
-    for key in ['width','height','fps','qp','encoder']:
+    for key in ['width','height','fps','qp','encoder','rate_control','bitrate_kbps']:
         value=getattr(a,key,None)
         if value is not None: backend[key]=value
     if backend['width'] % 2 or backend['height'] % 2 or not 2 <= backend['width'] <= 4096 or not 2 <= backend['height'] <= 2160 or not 30 <= backend['fps'] <= 120:
         raise ValueError('Invalid dimensions or frame rate')
-    if not 0 <= backend.get('qp',28) <= 51: raise ValueError('QP must be 0..51')
+    validate_rate(backend)
     if a.head_height is not None: hmd['headHeight']=a.head_height
     if not 0.3 <= hmd.get('headHeight',1.6) <= 2.5: raise ValueError('head-height must be 0.3..2.5 metres')
     hmd.update(width=backend['width'],height=backend['height'],frequency=float(backend['fps']))
     config['steamvr_hmd_init_config'].update(eye_resolution_width=backend['width']//2,eye_resolution_height=backend['height'],refresh_rate=backend['fps'])
     write_json(CONFIG,config);write_json(path,settings)
-    print(f"Updated: {backend['width']}x{backend['height']}@{backend['fps']} {backend['encoder']} QP={backend.get('qp',28)}; height={hmd.get('headHeight',1.6)} m")
+    print(f"Updated: {backend['width']}x{backend['height']}@{backend['fps']} {backend['encoder']} {rate_description(backend)}; height={hmd.get('headHeight',1.6)} m")
     print('Restart the VR backend as well as SteamVR; select the same video mode on iOS.')
     try:
         _,globalpath=paths()
@@ -160,9 +182,13 @@ def main():
     c.add_argument('--width',type=int,default=1920);c.add_argument('--height',type=int,default=1080);c.add_argument('--fps',type=int,default=60)
     c.add_argument('--video-key-file',required=True);c.add_argument('--motion-token-file',required=True);c.add_argument('--auth',choices=['key','password'],default='key');c.add_argument('--encoder',choices=['h264_nvenc','hevc_nvenc','libx264'],default='hevc_nvenc')
     c.add_argument('--qp',type=int,default=28);c.add_argument('--head-height',type=float,default=1.6)
+    c.add_argument('--rate-control',choices=['qp','bandwidth'],default='qp')
+    c.add_argument('--bitrate-kbps',type=int,default=DEFAULT_BITRATE_KBPS,help='Per-stream peak encoded-video rate in decimal kbit/s; used by bandwidth mode')
     for command in ['install','restore','run','status','launch']:sub.add_parser(command)
     t=sub.add_parser('tune')
     for key in ['width','height','fps','qp']:t.add_argument('--'+key,type=int)
+    t.add_argument('--rate-control',choices=['qp','bandwidth'])
+    t.add_argument('--bitrate-kbps',type=int,help='Per-stream peak encoded-video rate in decimal kbit/s; used by bandwidth mode')
     t.add_argument('--head-height',type=float)
     t.add_argument('--encoder',choices=['h264_nvenc','hevc_nvenc','libx264'])
     d=sub.add_parser('diagnose');d.add_argument('--openvr-library')

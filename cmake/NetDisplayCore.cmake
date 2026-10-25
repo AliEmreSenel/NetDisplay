@@ -52,6 +52,7 @@ function(nd_add_video_library)
     pkg_check_modules(ND_FFMPEG REQUIRED IMPORTED_TARGET GLOBAL libavcodec libavutil libswscale)
     add_library(nd_video STATIC
         "${NETDISPLAY_SOURCE_DIR}/src/video_tx.c"
-        "${NETDISPLAY_SOURCE_DIR}/src/encoder.c")
+        "${NETDISPLAY_SOURCE_DIR}/src/encoder.c"
+        "${NETDISPLAY_SOURCE_DIR}/src/encoder_rate.c")
     target_link_libraries(nd_video PUBLIC nd_transport PkgConfig::ND_FFMPEG)
 endfunction()

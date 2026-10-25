@@ -93,6 +93,42 @@ probed at runtime (for example NVENC, QSV, AMF, or VAAPI), and the capture conve
 uses the pixel format selected by the backend rather than a fixed NV12 wire
 assumption.
 
+Two encoder rate-control modes are available in `server.conf`. The default
+preserves fixed QP; lower QP gives higher quality and larger frames:
+
+```ini
+rate_control=qp
+qp=24
+```
+
+To let the encoder vary QP with scene complexity within a bandwidth budget:
+
+```ini
+rate_control=bandwidth
+bitrate_kbps=20000
+```
+
+`bitrate_kbps` is the peak encoded-video rate in decimal kbit/s **per stream**
+(20000 = 20 Mbit/s). Capped VBR targets 80% of that peak and requests a VBV
+reservoir of two frame periods. `qp` is ignored in bandwidth mode. Resolution,
+frame rate, all-intra encoding, and latest-frame replacement are preserved.
+QP scales differ by codec/backend; the supported configuration range is 0–51.
+The budget excludes UDP/IP, fragmentation and encryption overhead; frame bursts
+and encoder overshoot can exceed it briefly. This mode does not add packet
+pacing or adapt the budget to network feedback. Restart the server to switch
+modes. A backend that cannot open the requested mode is skipped during probing
+rather than silently using another rate-control mode.
+
+The dedicated VR backend supports the same choice without re-pairing:
+
+```sh
+python3 build-vr/netdisplay-vr/netdisplay-vr tune --rate-control bandwidth --bitrate-kbps 20000
+python3 build-vr/netdisplay-vr/netdisplay-vr tune --rate-control qp --qp 28
+```
+
+Run either command with SteamVR stopped, then restart the VR backend and SteamVR.
+The iOS receiver needs no changes.
+
 With no `display=` entries, the receiver uses every connected display at its
 preferred mode. Repeat the option to select displays or modes:
 

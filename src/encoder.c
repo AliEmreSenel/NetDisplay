@@ -144,15 +144,11 @@ static void configure_encoder_context(AVCodecContext *c, enum AVPixelFormat fmt,
   c->flags |= AV_CODEC_FLAG_LOW_DELAY;
 }
 
-static void encoder_open_options(const char *encoder_name, int qp_value,
+static void encoder_open_options(const char *encoder_name,
                                  AVDictionary **opts) {
-  char qps[16];
-  snprintf(qps, sizeof(qps), "%d", qp_value);
   if (strstr(encoder_name, "_nvenc")) {
     av_dict_set(opts, "preset", "p1", 0);
     av_dict_set(opts, "tune", "ull", 0);
-    av_dict_set(opts, "rc", "constqp", 0);
-    av_dict_set(opts, "qp", qps, 0);
     av_dict_set(opts, "zerolatency", "1", 0);
     av_dict_set(opts, "forced-idr", "1", 0);
     av_dict_set(opts, "delay", "0", 0);
@@ -162,15 +158,14 @@ static void encoder_open_options(const char *encoder_name, int qp_value,
       av_dict_set(opts, "aud", "1", 0);
   } else if (strstr(encoder_name, "_qsv")) {
     av_dict_set(opts, "preset", "veryfast", 0);
-    av_dict_set(opts, "global_quality", qps, 0);
-    av_dict_set(opts, "look_ahead", "0", 0);
+    if (!strcmp(encoder_name, "h264_qsv"))
+      av_dict_set(opts, "look_ahead", "0", 0);
   } else if (strstr(encoder_name, "_amf")) {
     av_dict_set(opts, "usage", "ultralowlatency", 0);
     av_dict_set(opts, "quality", "speed", 0);
   } else if (!strcmp(encoder_name, "libx264") || !strcmp(encoder_name, "libx265")) {
     av_dict_set(opts, "preset", "ultrafast", 0);
     av_dict_set(opts, "tune", "zerolatency", 0);
-    av_dict_set(opts, "crf", qps, 0);
   }
 }
 
@@ -241,10 +236,10 @@ void nd_encoder_close(struct nd_encoder *e) {
 }
 
 int nd_encoder_open(struct nd_encoder *e, const char *name, int width,
-                     int height, int fps, int qp,
+                     int height, int fps, const struct nd_encoder_rate *rate,
                      enum AVPixelFormat preferred, int quiet) {
   *e = (struct nd_encoder){.sw_format = AV_PIX_FMT_NONE};
-  if (!name || width <= 0 || height <= 0 || fps <= 0 || qp < 0 || qp > 51)
+  if (!name || width <= 0 || height <= 0 || fps <= 0 || !nd_encoder_rate_valid(rate))
     return -1;
   const struct encoder_candidate *candidate = find_encoder_candidate(name);
   /* Software fallback is explicit; hardware negotiation never selects it. */
@@ -255,8 +250,10 @@ int nd_encoder_open(struct nd_encoder *e, const char *name, int width,
   int ret = setup_encoder_input(e->context, codec, candidate, width, height, fps,
                                 preferred, &e->device, &e->frames, &e->sw_format);
   AVDictionary *opts = NULL;
+  if (ret == 0)
+    ret = nd_encoder_rate_apply(e->context, rate, fps);
   if (ret == 0) {
-    encoder_open_options(name, qp, &opts);
+    encoder_open_options(name, &opts);
     ret = avcodec_open2(e->context, codec, &opts);
   }
   if (ret >= 0 && strstr(name, "_nvenc")) {
@@ -277,12 +274,13 @@ int nd_encoder_open(struct nd_encoder *e, const char *name, int width,
 }
 
 int nd_video_choose_encoder(uint16_t codec, int width, int height, int fps,
-                            int qp, char *name, size_t name_size) {
+                            const struct nd_encoder_rate *rate,
+                            char *name, size_t name_size) {
   if (!ndc_codec_bit(codec) || !name || !name_size) return -1;
   for (size_t i = 0; i < sizeof(encoder_candidates) / sizeof(encoder_candidates[0]); i++) {
     if (encoder_candidates[i].codec != codec) continue;
     struct nd_encoder e;
-    if (nd_encoder_open(&e, encoder_candidates[i].name, width, height, fps, qp,
+    if (nd_encoder_open(&e, encoder_candidates[i].name, width, height, fps, rate,
                          AV_PIX_FMT_NONE, 1) >= 0) {
       nd_encoder_close(&e);
       snprintf(name, name_size, "%s", encoder_candidates[i].name);

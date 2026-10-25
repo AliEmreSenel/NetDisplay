@@ -127,7 +127,7 @@ fail:
 }
 
 int main(int argc, char **argv) {
-  if (argc != 2)
+  if (argc != 2 && !(argc == 3 && !strcmp(argv[2], "bandwidth")))
     return 2;
   if (sodium_init() < 0)
     return 2;
@@ -153,8 +153,9 @@ int main(int argc, char **argv) {
                    "listen=127.0.0.1\nport=%d\nvideo_port=%d\n"
                    "max_clients=4\noutput=testdisplay\n"
                    "brightness_device=none\npassword_key=%s\n"
-                   "frame_encryption=allowed\n",
-                   port, port + 1, password_key);
+                   "frame_encryption=allowed\n%s",
+                   port, port + 1, password_key,
+                   argc == 3 ? "rate_control=bandwidth\nbitrate_kbps=20000\n" : "");
   if (write(config, text, (size_t)n) != n) {
     close(config);
     unlink(path);

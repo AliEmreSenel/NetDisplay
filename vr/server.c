@@ -78,6 +78,18 @@ int main(int argc, char **argv) {
       fps = number(argv[7], 30, 120);
   if (w % 2 || h % 2 || (strcmp(argv[9], "key") && strcmp(argv[9], "password")))
     return 2;
+  struct nd_encoder_rate rate = {
+      ND_RATE_QP, strstr(argv[10], "nvenc") ? 28 : 23, ND_DEFAULT_BITRATE_KBPS};
+  const char *rate_mode = getenv("NETDISPLAY_VR_RATE_CONTROL");
+  const char *bitrate = getenv("NETDISPLAY_VR_BITRATE_KBPS");
+  const char *qp = getenv("NETDISPLAY_VR_QP");
+  if (qp) rate.qp = number(qp, 0, 51);
+  if ((rate_mode && nd_rate_control_parse(rate_mode, &rate.mode) < 0) ||
+      (bitrate && nd_bitrate_kbps_parse(bitrate, &rate.bitrate_kbps) < 0)) {
+    fprintf(stderr, "Invalid VR rate control: use qp or bandwidth, bitrate_kbps 1..%d\n",
+            ND_MAX_BITRATE_KBPS);
+    return 2;
+  }
   uint8_t key[32];
   if (nd_crypto_load_psk(argv[8], key) < 0) {
     perror("VR video key");
@@ -102,14 +114,18 @@ int main(int argc, char **argv) {
       listen(listener, 1) < 0)
     die("VR control bind");
   struct nd_encoder encoder;
-  const char *qp_text = getenv("NETDISPLAY_VR_QP");
-  int qp = qp_text ? number(qp_text, 0, 51) : (strstr(argv[10], "nvenc") ? 28 : 23);
-  if (nd_encoder_open(&encoder, argv[10], w, h, fps, qp, AV_PIX_FMT_YUV420P, 0) < 0) {
+  if (nd_encoder_open(&encoder, argv[10], w, h, fps, &rate, AV_PIX_FMT_YUV420P, 0) < 0) {
     fprintf(stderr, "VR encoder %s unavailable\n", argv[10]);
     close(listener);
     return 1;
   }
   AVCodecContext *enc = encoder.context;
+  if (rate.mode == ND_RATE_QP)
+    fprintf(stderr, "VR rate-control=qp QP=%d\n", rate.qp);
+  else
+    fprintf(stderr, "VR rate-control=bandwidth target=%lld peak=%lld kbit/s VBV=%d bits\n",
+            (long long)enc->bit_rate / 1000,
+            (long long)enc->rc_max_rate / 1000, enc->rc_buffer_size);
   if (enc->codec_id != AV_CODEC_ID_H264 && enc->codec_id != AV_CODEC_ID_HEVC) {
     fprintf(stderr, "VR encoder must be H.264 or HEVC\n");
     return 2;
