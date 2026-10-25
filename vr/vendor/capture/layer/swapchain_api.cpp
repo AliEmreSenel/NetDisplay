@@ -37,6 +37,18 @@
 #include "private_data.hpp"
 #include "swapchain_api.hpp"
 
+#include <chrono>
+#include <cstdio>
+struct NdvrTiming {
+ const char *name;
+ std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+ ~NdvrTiming() {
+  double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+  static thread_local unsigned n=0;
+  if(ms>4 && n++<200) fprintf(stderr,"NDVR wait %s %.3f ms\n",name,ms);
+ }
+};
+
 extern "C" {
 
 VKAPI_ATTR VkResult wsi_layer_vkCreateSwapchainKHR(
@@ -106,6 +118,7 @@ VKAPI_ATTR VkResult wsi_layer_vkAcquireNextImageKHR(VkDevice device, VkSwapchain
     layer::device_private_data &device_data = layer::device_private_data::get(device);
 
     if (!device_data.layer_owns_swapchain(swapc)) {
+        NdvrTiming timing{"acquire-native"};
         return device_data.disp.AcquireNextImageKHR(device_data.device, swapc, timeout, semaphore,
                                                     fence, pImageIndex);
     }
@@ -114,6 +127,7 @@ VKAPI_ATTR VkResult wsi_layer_vkAcquireNextImageKHR(VkDevice device, VkSwapchain
     assert(semaphore != VK_NULL_HANDLE || fence != VK_NULL_HANDLE);
     assert(pImageIndex != nullptr);
     wsi::swapchain_base *sc = reinterpret_cast<wsi::swapchain_base *>(swapc);
+    NdvrTiming timing{"acquire-headset"};
     return sc->acquire_next_image(timeout, semaphore, fence, pImageIndex);
 }
 
@@ -126,9 +140,11 @@ VKAPI_ATTR VkResult wsi_layer_vkQueuePresentKHR(VkQueue queue,
 
     if (!device_data.layer_owns_all_swapchains(pPresentInfo->pSwapchains,
                                                pPresentInfo->swapchainCount)) {
+        NdvrTiming timing{"present-native"};
         return device_data.disp.QueuePresentKHR(queue, pPresentInfo);
     }
 
+    NdvrTiming timing{"present-headset"};
     VkResult ret = VK_SUCCESS;
     for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i) {
         VkSwapchainKHR swapc = pPresentInfo->pSwapchains[i];
@@ -173,11 +189,13 @@ VKAPI_ATTR VkResult wsi_layer_vkWaitForPresentKHR(VkDevice device, VkSwapchainKH
     layer::device_private_data &device_data = layer::device_private_data::get(device);
 
     if (!device_data.layer_owns_swapchain(swapc)) {
+        NdvrTiming timing{"wait-present-native"};
         return device_data.disp.WaitForPresentKHR(device_data.device, swapc, presentId, timeout);
     }
 
     assert(swapc != VK_NULL_HANDLE);
     wsi::swapchain_base *sc = reinterpret_cast<wsi::swapchain_base *>(swapc);
+    NdvrTiming timing{"wait-present-headset"};
     return sc->wait_for_present(presentId, timeout);
 }
 

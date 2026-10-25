@@ -7,8 +7,6 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <poll.h>
-#include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,21 +18,20 @@
 #include <wayland-client.h>
 
 #include <libavcodec/avcodec.h>
-#include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
-#include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 
 #include "common.h"
 #include "crypto.h"
-#include "frame_transport.h"
 #include "proto.h"
 #include "screencopy.h"
 #include "video_sender.h"
+#include "video_tx.h"
+#include "encoder.h"
 
 struct output {
   struct wl_output *wl;
@@ -60,8 +57,7 @@ static AVCodecContext *enc;
 static AVFrame *enc_frame;
 static AVFrame *convert_frame;
 static AVPacket *enc_pkt;
-static AVBufferRef *enc_hw_device;
-static AVBufferRef *enc_hw_frames;
+static struct nd_encoder encoder;
 static int encoder_uses_hw_frames;
 static enum AVPixelFormat capture_format = AV_PIX_FMT_NONE;
 static enum AVPixelFormat encoder_sw_format = AV_PIX_FMT_NONE;
@@ -79,28 +75,10 @@ static uint32_t stream_height;
 static uint32_t stream_fps;
 static int frame_encrypted;
 static uint8_t frame_key[ND_KEY_SIZE];
-static uint8_t *encrypted_frame;
-
-/* Encoder -> TX handoff.  There is no FIFO: latest_pkt is a single slot.
- * If the producer publishes again before TX takes it, the older complete
- * frame is discarded.  tx_pkt is owned only by the TX thread. */
-static pthread_mutex_t tx_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t tx_cond = PTHREAD_COND_INITIALIZER;
-static AVPacket *latest_pkt;
-static AVPacket *tx_pkt;
-static uint32_t latest_seq;
-static int latest_ready;
-static pthread_t tx_thread;
+static struct nd_video_tx *tx;
 
 static unsigned long long stat_capture;
 static unsigned long long stat_encoded;
-static _Atomic unsigned long long stat_tx_bytes;
-static _Atomic unsigned long long stat_tx_frames;
-static _Atomic unsigned long long stat_latest_replaced;
-static _Atomic unsigned long long stat_tx_aborted;
-static _Atomic unsigned long long stat_eagain;
-static _Atomic unsigned long long stat_tx_errors;
-static _Atomic unsigned long long stat_oversize;
 static struct timespec stat_last;
 
 static void ff_die(const char *what, int err) {
@@ -299,333 +277,15 @@ static void alloc_capture_buffer(uint32_t format, uint32_t width,
       (format == WL_SHM_FORMAT_XRGB8888) ? AV_PIX_FMT_0RGB32 : AV_PIX_FMT_RGB32;
 }
 
-static const char *codec_wire_name(uint16_t codec) {
-  switch (codec) {
-  case NDC_VIDEO_AV1:
-    return "AV1";
-  case NDC_VIDEO_HEVC:
-    return "HEVC";
-  case NDC_VIDEO_H264:
-    return "H.264";
-  default:
-    return "unknown";
-  }
-}
-
-static uint32_t codec_wire_bit(uint16_t codec) {
-  switch (codec) {
-  case NDC_VIDEO_AV1:
-    return NDC_CODEC_AV1;
-  case NDC_VIDEO_HEVC:
-    return NDC_CODEC_HEVC;
-  case NDC_VIDEO_H264:
-    return NDC_CODEC_H264;
-  default:
-    return 0;
-  }
-}
-
-struct encoder_candidate {
-  uint16_t codec;
-  const char *name;
-  enum AVHWDeviceType hw_type;
-};
-
-/* Codec order is negotiated separately. Within one codec, prefer native GPU
- * backends that are common on Linux. The common pipeline supports both
- * software-frame hardware encoders (NVENC/QSV/AMF) and hardware-frame-only
- * encoders (notably VAAPI). */
-static const struct encoder_candidate encoder_candidates[] = {
-    {NDC_VIDEO_AV1, "av1_nvenc", AV_HWDEVICE_TYPE_CUDA},
-    {NDC_VIDEO_AV1, "av1_qsv", AV_HWDEVICE_TYPE_QSV},
-    {NDC_VIDEO_AV1, "av1_amf", AV_HWDEVICE_TYPE_NONE},
-    {NDC_VIDEO_AV1, "av1_vaapi", AV_HWDEVICE_TYPE_VAAPI},
-    {NDC_VIDEO_HEVC, "hevc_nvenc", AV_HWDEVICE_TYPE_CUDA},
-    {NDC_VIDEO_HEVC, "hevc_qsv", AV_HWDEVICE_TYPE_QSV},
-    {NDC_VIDEO_HEVC, "hevc_amf", AV_HWDEVICE_TYPE_NONE},
-    {NDC_VIDEO_HEVC, "hevc_vaapi", AV_HWDEVICE_TYPE_VAAPI},
-    {NDC_VIDEO_H264, "h264_nvenc", AV_HWDEVICE_TYPE_CUDA},
-    {NDC_VIDEO_H264, "h264_qsv", AV_HWDEVICE_TYPE_QSV},
-    {NDC_VIDEO_H264, "h264_amf", AV_HWDEVICE_TYPE_NONE},
-    {NDC_VIDEO_H264, "h264_vaapi", AV_HWDEVICE_TYPE_VAAPI},
-};
-
-static const struct encoder_candidate *
-find_encoder_candidate(const char *name) {
-  for (size_t i = 0;
-       i < sizeof(encoder_candidates) / sizeof(encoder_candidates[0]); i++)
-    if (!strcmp(encoder_candidates[i].name, name))
-      return &encoder_candidates[i];
-  return NULL;
-}
-
-static const enum AVPixelFormat *codec_pix_fmts(const AVCodec *codec) {
-#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 13, 100)
-  const void *list = NULL;
-  if (!codec ||
-      avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0,
-                                   &list, NULL) < 0)
-    return NULL;
-  return (const enum AVPixelFormat *)list;
-#else
-  /* FFmpeg before 7.1 exposes the same terminated list on AVCodec. */
-  return codec ? codec->pix_fmts : NULL;
-#endif
-}
-
-static int codec_accepts_pix_fmt(const AVCodec *codec, enum AVPixelFormat fmt);
-
-static enum AVPixelFormat choose_software_pix_fmt(
-    const AVCodec *codec, enum AVPixelFormat preferred) {
-  if (preferred != AV_PIX_FMT_NONE &&
-      codec_accepts_pix_fmt(codec, preferred)) {
-    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(preferred);
-    if (d && !(d->flags & AV_PIX_FMT_FLAG_HWACCEL))
-      return preferred;
-  }
-  const enum AVPixelFormat *fmts = codec_pix_fmts(codec);
-  if (!fmts)
-    return AV_PIX_FMT_NONE;
-  for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++) {
-    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(*p);
-    if (!d || (d->flags & AV_PIX_FMT_FLAG_HWACCEL))
-      continue;
-    if (sws_isSupportedOutput(*p))
-      return *p;
-  }
-  return AV_PIX_FMT_NONE;
-}
-
-static enum AVPixelFormat hw_format_for_type(enum AVHWDeviceType type) {
-  switch (type) {
-  case AV_HWDEVICE_TYPE_VAAPI:
-    return AV_PIX_FMT_VAAPI;
-  case AV_HWDEVICE_TYPE_QSV:
-    return AV_PIX_FMT_QSV;
-  case AV_HWDEVICE_TYPE_CUDA:
-    return AV_PIX_FMT_CUDA;
-  default:
-    return AV_PIX_FMT_NONE;
-  }
-}
-
-static int codec_accepts_pix_fmt(const AVCodec *codec, enum AVPixelFormat fmt) {
-  const enum AVPixelFormat *fmts = codec_pix_fmts(codec);
-  if (!fmts)
-    return 1;
-  for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++)
-    if (*p == fmt)
-      return 1;
-  return 0;
-}
-
-static enum AVPixelFormat choose_transfer_pix_fmt(AVBufferRef *device) {
-  AVHWFramesConstraints *constraints =
-      av_hwdevice_get_hwframe_constraints(device, NULL);
-  if (!constraints)
-    return AV_PIX_FMT_NONE;
-  enum AVPixelFormat chosen = AV_PIX_FMT_NONE;
-  if (constraints->valid_sw_formats) {
-    for (const enum AVPixelFormat *p = constraints->valid_sw_formats;
-         *p != AV_PIX_FMT_NONE; p++) {
-      const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(*p);
-      if (d && !(d->flags & AV_PIX_FMT_FLAG_HWACCEL) &&
-          sws_isSupportedOutput(*p)) {
-        chosen = *p;
-        break;
-      }
-    }
-  }
-  av_hwframe_constraints_free(&constraints);
-  return chosen;
-}
-
-static void configure_encoder_context(AVCodecContext *c, enum AVPixelFormat fmt,
-                                      int width, int height, int fps) {
-  c->width = width;
-  c->height = height;
-  c->time_base = (AVRational){1, fps};
-  c->framerate = (AVRational){fps, 1};
-  c->pix_fmt = fmt;
-  /* Some NVENC generations reject GOP=1 even with B-frames disabled.
-   * Every submitted frame is still explicitly marked I below, so a GOP size
-   * of 2 satisfies those drivers without introducing inter-frame dependency. */
-  c->gop_size = 2;
-  c->max_b_frames = 0;
-  c->refs = 1;
-  c->color_range = AVCOL_RANGE_MPEG;
-  c->color_primaries = AVCOL_PRI_BT709;
-  c->color_trc = AVCOL_TRC_BT709;
-  c->colorspace = AVCOL_SPC_BT709;
-  c->flags |= AV_CODEC_FLAG_LOW_DELAY;
-}
-
-static void encoder_open_options(const char *encoder_name, int qp_value,
-                                 AVDictionary **opts) {
-  char qps[16];
-  snprintf(qps, sizeof(qps), "%d", qp_value);
-  if (strstr(encoder_name, "_nvenc")) {
-    av_dict_set(opts, "preset", "p1", 0);
-    av_dict_set(opts, "tune", "ull", 0);
-    av_dict_set(opts, "rc", "constqp", 0);
-    av_dict_set(opts, "qp", qps, 0);
-    av_dict_set(opts, "zerolatency", "1", 0);
-    av_dict_set(opts, "forced-idr", "1", 0);
-    av_dict_set(opts, "delay", "0", 0);
-    av_dict_set(opts, "rc-lookahead", "0", 0);
-    av_dict_set(opts, "rgb_mode", "yuv420", 0);
-    if (!strstr(encoder_name, "av1_"))
-      av_dict_set(opts, "aud", "1", 0);
-  } else if (strstr(encoder_name, "_qsv")) {
-    av_dict_set(opts, "preset", "veryfast", 0);
-    av_dict_set(opts, "global_quality", qps, 0);
-    av_dict_set(opts, "look_ahead", "0", 0);
-  } else if (strstr(encoder_name, "_amf")) {
-    av_dict_set(opts, "usage", "ultralowlatency", 0);
-    av_dict_set(opts, "quality", "speed", 0);
-  }
-}
-
-static int setup_encoder_input(AVCodecContext *ctx, const AVCodec *codec,
-                               const struct encoder_candidate *candidate,
-                               int width, int height, int fps,
-                               enum AVPixelFormat preferred_sw_format,
-                               AVBufferRef **device_out,
-                               AVBufferRef **frames_out,
-                               enum AVPixelFormat *sw_format_out) {
-  enum AVPixelFormat sw_format =
-      choose_software_pix_fmt(codec, preferred_sw_format);
-  if (sw_format != AV_PIX_FMT_NONE) {
-    configure_encoder_context(ctx, sw_format, width, height, fps);
-    *sw_format_out = sw_format;
-    return 0;
-  }
-
-  if (!candidate || candidate->hw_type == AV_HWDEVICE_TYPE_NONE)
-    return -1;
-  enum AVPixelFormat hw_format = hw_format_for_type(candidate->hw_type);
-  if (hw_format == AV_PIX_FMT_NONE || !codec_accepts_pix_fmt(codec, hw_format))
-    return -1;
-
-  AVBufferRef *device = NULL;
-  if (av_hwdevice_ctx_create(&device, candidate->hw_type, NULL, NULL, 0) < 0)
-    return -1;
-  sw_format = choose_transfer_pix_fmt(device);
-  if (sw_format == AV_PIX_FMT_NONE) {
-    av_buffer_unref(&device);
-    return -1;
-  }
-
-  AVBufferRef *frames = av_hwframe_ctx_alloc(device);
-  if (!frames) {
-    av_buffer_unref(&device);
-    return -1;
-  }
-  AVHWFramesContext *frames_ctx = (AVHWFramesContext *)frames->data;
-  frames_ctx->format = hw_format;
-  frames_ctx->sw_format = sw_format;
-  frames_ctx->width = width;
-  frames_ctx->height = height;
-  frames_ctx->initial_pool_size = 4;
-  if (av_hwframe_ctx_init(frames) < 0) {
-    av_buffer_unref(&frames);
-    av_buffer_unref(&device);
-    return -1;
-  }
-
-  configure_encoder_context(ctx, hw_format, width, height, fps);
-  ctx->hw_frames_ctx = av_buffer_ref(frames);
-  if (!ctx->hw_frames_ctx) {
-    av_buffer_unref(&frames);
-    av_buffer_unref(&device);
-    return -1;
-  }
-  *device_out = device;
-  *frames_out = frames;
-  *sw_format_out = sw_format;
-  return 0;
-}
-
-static int probe_encoder_candidate(const struct encoder_candidate *candidate,
-                                   int width, int height, int fps, int qp_value) {
-  const AVCodec *codec = avcodec_find_encoder_by_name(candidate->name);
-  if (!codec)
-    return 0;
-  AVCodecContext *ctx = avcodec_alloc_context3(codec);
-  if (!ctx)
-    return 0;
-  /* Capability probes are expected to fail often. Keep libavcodec's expected
-   * backend errors out of the daemon log and use the same low-latency options
-   * as the real stream so probe/runtime cannot disagree on encoder setup. */
-  ctx->log_level_offset = 128;
-  AVBufferRef *device = NULL, *frames = NULL;
-  enum AVPixelFormat sw_format = AV_PIX_FMT_NONE;
-  int ret = setup_encoder_input(ctx, codec, candidate, width, height, fps,
-                                AV_PIX_FMT_NONE, &device, &frames, &sw_format);
-  AVDictionary *opts = NULL;
-  if (ret == 0) {
-    encoder_open_options(candidate->name, qp_value, &opts);
-    ret = avcodec_open2(ctx, codec, &opts);
-  }
-  av_dict_free(&opts);
-  avcodec_free_context(&ctx);
-  av_buffer_unref(&frames);
-  av_buffer_unref(&device);
-  return ret >= 0;
-}
-
-int nd_video_choose_encoder(uint16_t codec, int width, int height, int fps,
-                            int qp_value, char *name, size_t name_size) {
-  if (!codec_wire_bit(codec) || !name || !name_size)
-    return -1;
-  for (size_t i = 0;
-       i < sizeof(encoder_candidates) / sizeof(encoder_candidates[0]); i++) {
-    if (encoder_candidates[i].codec != codec)
-      continue;
-    if (probe_encoder_candidate(&encoder_candidates[i], width, height, fps,
-                                qp_value)) {
-      snprintf(name, name_size, "%s", encoder_candidates[i].name);
-      return 0;
-    }
-  }
-  return -1;
-}
-
 static void init_encoder(void) {
-  const AVCodec *codec = avcodec_find_encoder_by_name(selected_encoder);
-  const struct encoder_candidate *candidate =
-      find_encoder_candidate(selected_encoder);
-  if (!codec || !candidate) {
-    fprintf(stderr, "hardware encoder '%s' disappeared\n", selected_encoder);
+  if (nd_encoder_open(&encoder, selected_encoder, (int)stream_width,
+                       (int)stream_height, (int)stream_fps, qp, capture_format, 0) < 0) {
+    fprintf(stderr, "cannot open encoder '%s'\n", selected_encoder);
     exit(EXIT_FAILURE);
   }
-
-  enc = avcodec_alloc_context3(codec);
-  if (!enc)
-    die("avcodec_alloc_context3");
-  if (setup_encoder_input(enc, codec, candidate, (int)stream_width,
-                          (int)stream_height, (int)stream_fps, capture_format,
-                          &enc_hw_device, &enc_hw_frames,
-                          &encoder_sw_format) < 0) {
-    fprintf(stderr, "cannot configure input for hardware encoder '%s'\n",
-            selected_encoder);
-    exit(EXIT_FAILURE);
-  }
-  encoder_uses_hw_frames = enc_hw_frames != NULL;
-
-  AVDictionary *opts = NULL;
-  encoder_open_options(selected_encoder, qp, &opts);
-
-  int ret = avcodec_open2(enc, codec, &opts);
-  if (ret < 0)
-    ff_die("avcodec_open2(hardware encoder)", ret);
-  if (opts) {
-    AVDictionaryEntry *e = NULL;
-    while ((e = av_dict_get(opts, "", e, AV_DICT_IGNORE_SUFFIX)))
-      fprintf(stderr, "warning: unused %s option %s=%s\n", selected_encoder,
-              e->key, e->value);
-    av_dict_free(&opts);
-  }
+  enc = encoder.context;
+  encoder_sw_format = encoder.sw_format;
+  encoder_uses_hw_frames = encoder.frames != NULL;
 
   convert_frame = av_frame_alloc();
   enc_pkt = av_packet_alloc();
@@ -643,7 +303,7 @@ static void init_encoder(void) {
 
   if (encoder_uses_hw_frames) {
     enc_frame = av_frame_alloc();
-    if (!enc_frame || av_hwframe_get_buffer(enc_hw_frames, enc_frame, 0) < 0)
+    if (!enc_frame || av_hwframe_get_buffer(encoder.frames, enc_frame, 0) < 0)
       die("av_hwframe_get_buffer");
   } else {
     enc_frame = convert_frame;
@@ -658,7 +318,7 @@ static void init_encoder(void) {
   fprintf(
       stderr,
       "%s via %s: %ux%u@%u QP=%d transfer=%s encoder=%s capture=%s all-intra\n",
-      codec_wire_name(selected_codec), selected_encoder, stream_width,
+      ndc_codec_name(selected_codec), selected_encoder, stream_width,
       stream_height, stream_fps, qp,
       av_get_pix_fmt_name(encoder_sw_format)
           ? av_get_pix_fmt_name(encoder_sw_format)
@@ -667,95 +327,6 @@ static void init_encoder(void) {
                                         : "?",
       av_get_pix_fmt_name(capture_format) ? av_get_pix_fmt_name(capture_format)
                                           : "?");
-}
-
-static int tx_has_newer(void) {
-  int ready;
-  pthread_mutex_lock(&tx_mutex);
-  ready = latest_ready;
-  pthread_mutex_unlock(&tx_mutex);
-  return ready;
-}
-
-/* Send one encoded intra frame.  The socket is used nonblocking here so the TX
- * thread can notice a newer complete frame and abandon this one rather than
- * ever building video latency.  Return 0=complete, 1=aborted for newer,
- * -1=send error. */
-static int tx_obsolete(void *unused) {
-  (void)unused;
-  return tx_has_newer();
-}
-
-static int send_encoded_frame(const uint8_t *data, size_t size, uint32_t seq) {
-  if (!size || size > ND_MAX_FRAME) {
-    atomic_fetch_add(&stat_oversize, 1);
-    return -1;
-  }
-  struct nd_tx_stats stats = {0};
-  int rc = nd_frame_send(udp_fd, session_id, seq, data, size,
-                         frame_encrypted ? frame_key : NULL, encrypted_frame,
-                         tx_obsolete, NULL, &stats);
-  atomic_fetch_add(&stat_tx_bytes, stats.bytes);
-  atomic_fetch_add(&stat_eagain, stats.eagain);
-  atomic_fetch_add(&stat_tx_errors, stats.errors);
-  if (!rc)
-    atomic_fetch_add(&stat_tx_frames, 1);
-  return rc;
-}
-
-static void publish_encoded_packet(AVPacket *pkt, uint32_t seq) {
-  pthread_mutex_lock(&tx_mutex);
-
-  if (latest_ready) {
-    /* This complete frame never reached TX.  Replace it with the newer one. */
-    av_packet_unref(latest_pkt);
-    atomic_fetch_add_explicit(&stat_latest_replaced, 1, memory_order_relaxed);
-  }
-
-  av_packet_move_ref(latest_pkt, pkt);
-  latest_seq = seq;
-  latest_ready = 1;
-  pthread_cond_signal(&tx_cond);
-  pthread_mutex_unlock(&tx_mutex);
-}
-
-static void *tx_main(void *unused) {
-  (void)unused;
-
-  for (;;) {
-    uint32_t seq;
-
-    pthread_mutex_lock(&tx_mutex);
-    while (!latest_ready)
-      pthread_cond_wait(&tx_cond, &tx_mutex);
-
-    av_packet_unref(tx_pkt);
-    av_packet_move_ref(tx_pkt, latest_pkt);
-    seq = latest_seq;
-    latest_ready = 0;
-    pthread_mutex_unlock(&tx_mutex);
-
-    int rc = send_encoded_frame(tx_pkt->data, (size_t)tx_pkt->size, seq);
-    if (rc == 1)
-      atomic_fetch_add_explicit(&stat_tx_aborted, 1, memory_order_relaxed);
-
-    av_packet_unref(tx_pkt);
-  }
-  return NULL;
-}
-
-static void start_tx_thread(void) {
-  latest_pkt = av_packet_alloc();
-  tx_pkt = av_packet_alloc();
-  if (!latest_pkt || !tx_pkt) {
-    fprintf(stderr, "av_packet_alloc(tx) failed\n");
-    exit(EXIT_FAILURE);
-  }
-  int rc = pthread_create(&tx_thread, NULL, tx_main, NULL);
-  if (rc != 0) {
-    errno = rc;
-    die("pthread_create tx");
-  }
 }
 
 static void print_stats(void) {
@@ -771,20 +342,10 @@ static void print_stats(void) {
     return;
 
   static unsigned long long lc, le, lb, lt, lr, la, lg, lerr, lo;
-  unsigned long long b =
-      atomic_load_explicit(&stat_tx_bytes, memory_order_relaxed);
-  unsigned long long t =
-      atomic_load_explicit(&stat_tx_frames, memory_order_relaxed);
-  unsigned long long r =
-      atomic_load_explicit(&stat_latest_replaced, memory_order_relaxed);
-  unsigned long long a =
-      atomic_load_explicit(&stat_tx_aborted, memory_order_relaxed);
-  unsigned long long g =
-      atomic_load_explicit(&stat_eagain, memory_order_relaxed);
-  unsigned long long er =
-      atomic_load_explicit(&stat_tx_errors, memory_order_relaxed);
-  unsigned long long o =
-      atomic_load_explicit(&stat_oversize, memory_order_relaxed);
+  struct nd_video_tx_stats stats = nd_video_tx_snapshot(tx);
+  unsigned long long b = stats.bytes, t = stats.complete, r = stats.replaced;
+  unsigned long long a = stats.aborted, g = stats.eagain, er = stats.errors;
+  unsigned long long o = stats.oversize;
 
   fprintf(
       stderr,
@@ -862,12 +423,7 @@ static int encode_and_publish(int y_invert) {
     }
     stat_encoded++;
     uint32_t seq = ++seq_id;
-    if ((size_t)enc_pkt->size > ND_MAX_FRAME) {
-      atomic_fetch_add_explicit(&stat_oversize, 1, memory_order_relaxed);
-      av_packet_unref(enc_pkt);
-      continue;
-    }
-    publish_encoded_packet(enc_pkt, seq);
+    nd_video_tx_publish(tx, enc_pkt, seq);
   }
   return produced ? 0 : 1;
 }
@@ -1004,7 +560,7 @@ int nd_video_sender_run(const char *output_name, const char *ip, int port,
       port > 65535 || qp_value < 0 || qp_value > 51 || width <= 0 ||
       width > UINT16_MAX || (width & 1) || height <= 0 || height > UINT16_MAX ||
       (height & 1) || refresh_hz <= 0 || refresh_hz > UINT16_MAX ||
-      !codec_wire_bit(video_codec) || !encoder_name || !*encoder_name) {
+      !ndc_codec_bit(video_codec) || !encoder_name || !*encoder_name) {
     fprintf(stderr, "invalid built-in video sender parameters\n");
     return 2;
   }
@@ -1019,15 +575,16 @@ int nd_video_sender_run(const char *output_name, const char *ip, int port,
     if (key_fd < 0 || ndc_read_full(key_fd, frame_key, sizeof(frame_key)) <= 0)
       die("read video key");
     close(key_fd);
-    encrypted_frame = av_malloc(ND_MAX_WIRE_FRAME);
-    if (!encrypted_frame)
-      die("av_malloc encrypted frame");
   }
 
   setup_udp(ip, port);
   session_id = wire_session ? wire_session : make_session_id();
   seq_id = 0;
-  start_tx_thread();
+  tx = nd_video_tx_open(udp_fd, session_id, frame_encrypted ? frame_key : NULL,
+                        stream_fps);
+  explicit_bzero(frame_key, sizeof(frame_key));
+  if (!tx)
+    die("video transmitter");
 
   display = wl_display_connect(NULL);
   if (!display)
@@ -1058,7 +615,7 @@ int nd_video_sender_run(const char *output_name, const char *ip, int port,
       stderr,
       "stream %ux%u@%u codec=%s encoder=%s: output=%s -> %s:%d session=%016llx "
       "encryption=%s\n",
-      stream_width, stream_height, stream_fps, codec_wire_name(selected_codec),
+      stream_width, stream_height, stream_fps, ndc_codec_name(selected_codec),
       selected_encoder, output_name, ip, port, (unsigned long long)session_id,
       frame_encrypted ? "on" : "off");
 
@@ -1066,5 +623,6 @@ int nd_video_sender_run(const char *output_name, const char *ip, int port,
   while (wl_display_dispatch(display) >= 0) {
   }
   perror("wl_display_dispatch");
+  nd_video_tx_close(tx);
   return 1;
 }

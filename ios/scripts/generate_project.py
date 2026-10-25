@@ -24,7 +24,7 @@ def emit(value, depth=0):
 
 sources = sorted([str(p.relative_to(ROOT)) for p in (ROOT/'App').glob('*.swift')]
                  + [str(p.relative_to(ROOT)) for p in (ROOT/'Core').glob('*.swift')]
-                 + ['App/Viewer.metal', 'Native/NDNative.c', '../src/crypto.c'])
+                 + ['App/Viewer.metal', 'Native/NDNative.c', '../src/crypto.c', '../src/frame_receiver.c'])
 refs=[]; source_build=[]; resource_build=[]; framework_build=[]
 for path in sources + ['App/Info.plist','App/PrivacyInfo.xcprivacy','Native/NDNative.h','Native/NetDisplay-Bridging-Header.h','App/Assets.xcassets']:
     types={'.swift':'sourcecode.swift','.metal':'sourcecode.metal','.c':'sourcecode.c.c','.h':'sourcecode.c.h','.plist':'text.plist.xml','.xcprivacy':'text.plist.xml','.xcassets':'folder.assetcatalog'}

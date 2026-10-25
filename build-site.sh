@@ -22,6 +22,7 @@ fi
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=OFF \
     -DNETDISPLAY_BUILD_SERVER=ON -DNETDISPLAY_BUILD_CLIENT=ON \
+    -DNETDISPLAY_BUILD_VR=OFF -DNETDISPLAY_BUILD_STEAMVR=OFF \
     "-DNETDISPLAY_STATIC_CLIENT_PREFIX=${NETDISPLAY_STATIC_CLIENT_PREFIX:-}"
 cmake --build "$BUILD" --parallel "$JOBS"
 
@@ -35,7 +36,7 @@ cp "$ROOT/LICENSE" "$SITE/LICENSE"
 cp "$ROOT/config/client.conf.example" "$ROOT/config/server.conf.example" "$SITE/"
 
 # Keep the fallback archive to the files required for a release build.
-tar -czf "$SITE/source.tar.gz" -C "$ROOT" LICENSE CMakeLists.txt src protocols kernel/netdisplay_power.h
+tar -czf "$SITE/source.tar.gz" -C "$ROOT" LICENSE CMakeLists.txt cmake src protocols kernel/netdisplay_power.h
 
 printf '\nBuilt site directory: %s\n' "$SITE"
 printf 'Configured artifact URL: %s\n' "$PUBLIC_URL"

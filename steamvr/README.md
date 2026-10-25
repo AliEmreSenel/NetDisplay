@@ -48,6 +48,11 @@ registering it. Rebuilding preserves the build package's existing settings.
 The bundled library must be compatible with SteamVR's runtime; a host-only
 successful load does not establish runtime compatibility.
 
+The root build also supports `-DNETDISPLAY_BUILD_STEAMVR=ON` with the same
+`OPENVR_INCLUDE_DIR`. Use the root `all` or `vr` CMake preset to build this
+driver together with the dedicated backend. Shared protocol and motion tests
+are registered once in a combined build.
+
 ## Pair and configure
 
 1. On iOS select **Viewer → VR / SteamVR**, **Side-by-side stereo**, enable motion

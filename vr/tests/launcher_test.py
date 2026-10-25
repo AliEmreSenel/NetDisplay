@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch
 p=Path(__file__).resolve().parents[1]/'netdisplay-vr.py'
 spec=importlib.util.spec_from_file_location('launcher',p)
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -30,3 +31,31 @@ with tempfile.TemporaryDirectory() as temporary:
     assert m.CONFIG.read_bytes()==before
     assert m.CONFIG.stat().st_mode & 0o777 == 0o600
 print('PASS: launcher tune, matching capture/HMD mode, preserved pairing paths, validation and file permissions')
+
+# Exercise installation, legacy migration, and restoration without SteamVR.
+with tempfile.TemporaryDirectory() as temporary:
+    root=Path(temporary); runtime=root/'runtime'; binary=runtime/'bin/linux64/vrcompositor'
+    binary.parent.mkdir(parents=True); binary.write_bytes(b'original compositor')
+    settings=root/'steamvr.vrsettings'; settings.write_text('{}')
+    m.PACKAGE=root/'package'; m.PACKAGE.mkdir()
+    m.CONFIG=m.PACKAGE/'session.json'; m.CONFIG.write_text('{}')
+    m.STATE=m.PACKAGE/'installation.json'
+    wrapper=m.PACKAGE/'compositor-wrapper'; wrapper.write_text('wrapper')
+    m.paths=lambda:(runtime,settings)
+    original=binary.parent/'netdisplay-original/vrcompositor'
+    legacy=binary.with_name('vrcompositor.netdisplay-original')
+    with patch.object(m.subprocess,'run'):
+        m.install()
+        assert binary.is_symlink() and binary.resolve()==wrapper
+        assert original.read_bytes()==b'original compositor'
+        original.rename(legacy)
+        m.install()
+        assert original.is_file() and not legacy.exists()
+        m.restore()
+        assert not binary.is_symlink() and binary.read_bytes()==b'original compositor'
+        assert json.loads(settings.read_text())['steamvr']=={}
+        m.install()
+        original.rename(legacy)
+        m.restore()
+        assert binary.read_bytes()==b'original compositor' and not m.STATE.exists()
+print('PASS: compositor basename, legacy migration, and reversible installation')

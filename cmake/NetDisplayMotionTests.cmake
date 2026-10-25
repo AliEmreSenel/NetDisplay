@@ -1,0 +1,11 @@
+include_guard(GLOBAL)
+add_executable(netdisplay-motion-test "${NETDISPLAY_SOURCE_DIR}/steamvr/motion_test.cpp")
+target_link_libraries(netdisplay-motion-test PRIVATE PkgConfig::SODIUM)
+target_compile_features(netdisplay-motion-test PRIVATE cxx_std_17)
+add_test(NAME steamvr-motion COMMAND netdisplay-motion-test)
+add_executable(netdisplay-space-test "${NETDISPLAY_SOURCE_DIR}/steamvr/tracking_space_test.cpp")
+target_compile_features(netdisplay-space-test PRIVATE cxx_std_17)
+add_test(NAME steamvr-stationary-space COMMAND netdisplay-space-test)
+# These tests use assert(), including in release builds.
+target_compile_options(netdisplay-motion-test PRIVATE -UNDEBUG)
+target_compile_options(netdisplay-space-test PRIVATE -UNDEBUG)

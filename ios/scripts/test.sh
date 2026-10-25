@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/ios/build/tests"
 mkdir -p "$OUT"
+python3 "$ROOT/tools/generate-wire.py" --check
 exec > >(tee "$OUT/test.log") 2>&1
 command -v swiftc >/dev/null || { echo 'Swift compiler is required (included on the macOS CI runner).' >&2; exit 1; }
 if [ -z "${SODIUM_TEST_CFLAGS:-}" ]; then
@@ -17,7 +18,7 @@ swiftc -swift-version 5 "$ROOT"/ios/Core/*.swift "$ROOT/ios/Tests/main.swift" -o
 # shellcheck disable=SC2086
 ${CC:-cc} -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra \
   -I"$ROOT/src" -I"$ROOT/ios/Native" $SODIUM_TEST_CFLAGS \
-  "$ROOT/ios/Native/NDNative.c" "$ROOT/src/crypto.c" "$ROOT/ios/Tests/wire_test.c" \
+  "$ROOT/ios/Native/NDNative.c" "$ROOT/src/crypto.c" "$ROOT/src/frame_receiver.c" "$ROOT/ios/Tests/wire_test.c" \
   $SODIUM_TEST_LIBS -o "$OUT/wire-tests"
 "$OUT/wire-tests" "$OUT"
 python3 "$ROOT/ios/Tests/test_cross_language.py" "$OUT"

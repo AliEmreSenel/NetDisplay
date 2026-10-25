@@ -3,6 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 command -v xcodebuild >/dev/null || { echo 'Xcode is required; use the GitHub Actions iOS workflow from Linux.' >&2; exit 1; }
+python3 "$ROOT/../tools/generate-wire.py" --check
 python3 "$ROOT/scripts/generate_project.py"
 bash "$ROOT/scripts/prepare-deps.sh"
 mkdir -p "$ROOT/build"

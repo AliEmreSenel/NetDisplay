@@ -139,15 +139,18 @@ jobs:
             libx11-dev libxrandr-dev python3
           git clone https://github.com/ValveSoftware/openvr.git "$RUNNER_TEMP/openvr"
           git -C "$RUNNER_TEMP/openvr" checkout 0924064316de3effbcd1acf1e309182a2deb1c05
-      - name: Build and test driver
+      - name: Build and test both VR paths and the shared core
         run: |
-          cmake -S steamvr -B build-steamvr -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build-all -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DNETDISPLAY_BUILD_SERVER=OFF -DNETDISPLAY_BUILD_CLIENT=OFF \
+            -DNETDISPLAY_BUILD_VR=ON -DNETDISPLAY_BUILD_STEAMVR=ON \
             -DOPENVR_INCLUDE_DIR="$RUNNER_TEMP/openvr/headers"
-          cmake --build build-steamvr --parallel 2
-          ctest --test-dir build-steamvr --output-on-failure
-      - name: Build dedicated VR backend, capture layer and runtime diagnostics
+          cmake --build build-all --parallel 2
+          ctest --test-dir build-all --output-on-failure --parallel 2
+      - name: Verify standalone VR entry points
         run: |
-          cmake -S vr -B build-vr -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-            -DOPENVR_INCLUDE_DIR="$RUNNER_TEMP/openvr/headers"
-          cmake --build build-vr --parallel 2
-          ctest --test-dir build-vr --output-on-failure
+          for component in steamvr vr; do
+            cmake -S "$component" -B "build-$component" -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTING=OFF -DOPENVR_INCLUDE_DIR="$RUNNER_TEMP/openvr/headers"
+            cmake --build "build-$component" --parallel 2
+          done

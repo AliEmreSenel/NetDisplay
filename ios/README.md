@@ -40,7 +40,14 @@ Core Motion -> relative orientation + gyro + timestamps -> HMAC UDP
    -> tools/ios/pose_receiver.py or a renderer using motion_protocol.py
 ```
 
-The app uses **the existing `../src/crypto.c` unchanged**. It does not duplicate or reinterpret the authentication KDF/proof implementation in Swift. The native bridge and v6 structs are compiled together. The historical `NetDisplay-v5-*` crypto domain labels are retained because that is what the v6 server uses; changing the labels would break interoperability.
+The app compiles the shared `../src/crypto.c` and `../src/frame_receiver.c`
+used by the Linux and VR streaming core. The native bridge adapts the shared
+packet reassembler and its statistics to Swift. Protocol constants and message
+IDs in `Core/ProtocolConstants.swift` are generated from the C wire headers by
+`python3 tools/generate-wire.py`; the portable checks verify they are current.
+The app does not duplicate the authentication KDF/proof implementation in
+Swift. The historical `NetDisplay-v5-*` crypto domain labels are retained
+because the v6 server uses them; changing them would break interoperability.
 
 ### Deliberate low-latency boundaries
 

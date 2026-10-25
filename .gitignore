@@ -22,3 +22,7 @@
 /output-power.h
 *.o
 
+
+# Python bytecode
+__pycache__/
+*.py[cod]

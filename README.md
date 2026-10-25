@@ -204,6 +204,59 @@ ctest --test-dir build --output-on-failure --parallel 2
 Set `NETDISPLAY_BUILD_SERVER=OFF` or `NETDISPLAY_BUILD_CLIENT=OFF` to build
 only the other component.
 
+The root build also supports `NETDISPLAY_BUILD_VR=ON` for the dedicated VR
+backend/capture layer and `NETDISPLAY_BUILD_STEAMVR=ON` for the standalone HMD
+driver. Both require `OPENVR_INCLUDE_DIR`; the VR backend also needs Vulkan
+headers, libdrm, X11/XRandR headers, and FFmpeg. All enabled components reuse
+the same compiled protocol, transport, and encoder libraries.
+
+With Ninja installed, presets provide separate incremental build directories
+for `desktop`, `core` (hardware-independent tests), `vr`, and `all`:
+
+```sh
+cmake --preset desktop
+cmake --build --preset desktop --parallel
+ctest --preset desktop
+
+# Build desktop, dedicated VR, and the standalone driver together:
+OPENVR_INCLUDE_DIR=/path/to/openvr/headers cmake --preset all
+cmake --build --preset all --parallel
+ctest --preset all
+```
+
+Add `-DNETDISPLAY_ENABLE_IPO=ON` at configure time to enable release link-time
+optimization after checking compiler support. Compiler caches can be enabled
+with standard CMake options such as `-DCMAKE_C_COMPILER_LAUNCHER=ccache` and
+`-DCMAKE_CXX_COMPILER_LAUNCHER=ccache`. `make` detects the CPU count; set `JOBS`
+to limit concurrency and `CMAKE_ARGS` to pass additional configure options.
+
+The existing `cmake -S vr` and `cmake -S steamvr` entry points remain supported.
+They use the same shared target definitions as the root build. iOS continues
+to build through Xcode.
+
+## Shared streaming core
+
+Desktop and VR use the same v6 control protocol, authentication proofs,
+stream-key derivation, and fragmented UDP video format. Capability flags
+negotiate optional features; VR requires authenticated, encrypted video and a
+matching stereo mode. Capture, device control, rendering, and head tracking
+remain in their platform-specific components.
+
+`src/session.*` implements the native authentication exchange.
+`src/encoder.*` owns hardware encoder selection and low-latency configuration.
+`src/video_tx.*` owns the single-slot transmit worker: newer independent
+frames replace pending frames and a send expires after one frame interval.
+`src/frame_transport.*` sends datagrams; `src/frame_receiver.*` validates,
+reassembles, and decrypts them on both Linux and iOS. The iOS native bridge
+only adapts that shared receiver to Swift.
+
+`src/control_proto.h` and `src/proto.h` are the wire definitions. After changing
+protocol constants, run `python3 tools/generate-wire.py` to update the checked-in
+Swift constants, then `python3 ios/scripts/generate_project.py` if adding
+sources. Tests check generated constants, mutual authentication and encryption
+policy, transmit cancellation/replacement, and real encoded video passing
+through both receiver interfaces. Wire compatibility stays at v6.
+
 Default ports are UDP 5000 onward for video, UDP 5001 for discovery, and TCP
 5001 for control, authentication, and optional input.
 

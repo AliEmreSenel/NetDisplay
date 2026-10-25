@@ -15,6 +15,18 @@ const struct {
 } alvr_display_mode;
 const VkDisplayModeKHR alvr_display_mode_handle = (VkDisplayModeKHR_T *)&alvr_display_mode;
 
+#include <chrono>
+#include <cstdio>
+struct NdvrFenceTiming {
+ const char *name;
+ std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+ ~NdvrFenceTiming() {
+  double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+  static thread_local unsigned n=0;
+  if(ms>4 && n++<200) fprintf(stderr,"NDVR wait %s %.3f ms\n",name,ms);
+ }
+};
+
 extern "C" {
 
 VKAPI_ATTR VkResult VKAPI_CALL wsi_layer_vkGetPhysicalDeviceDisplayPropertiesKHR(
@@ -170,9 +182,11 @@ VKAPI_ATTR VkResult VKAPI_CALL wsi_layer_vkWaitForFences(VkDevice device, uint32
     for (uint32_t i = 0; i < fenceCount; ++i) {
         if (pFences[i] == alvr_fence) {
             assert(fenceCount == 1); // only our fence
+            NdvrFenceTiming timing{"vsync"};
             return instance.display->wait_for_vsync(timeout) ? VK_SUCCESS : VK_TIMEOUT;
         }
     }
+    NdvrFenceTiming timing{"fence-native"};
     return instance.disp.WaitForFences(device, fenceCount, pFences, waitAll, timeout);
 }
 

@@ -2,11 +2,13 @@
 #define _GNU_SOURCE
 #include "capture.h"
 #include "video_tx.h"
+#include "encoder.h"
 #include "common.h"
 #include "crypto.h"
+#include "session.h"
 #include "frame_transport.h"
 #include <libavcodec/avcodec.h>
-#include <libavutil/opt.h>
+#include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
 #include <poll.h>
 #include <sodium.h>
@@ -15,12 +17,6 @@ static volatile sig_atomic_t stopping;
 static void stop(int sig) {
   (void)sig;
   stopping = 1;
-}
-static int expected(int fd, uint16_t want, void *p, uint32_t size) {
-  uint16_t type = 0;
-  uint32_t n = size;
-  return ndc_recv_msg(fd, &type, p, &n) == 1 && type == want && n == size ? 0
-                                                                          : -1;
 }
 struct capture_worker {
   struct ndvr_capture *capture;
@@ -62,62 +58,6 @@ static int number(const char *s, int lo, int hi) {
     exit(2);
   }
   return (int)n;
-}
-static AVCodecContext *encoder(int w, int h, int fps, const char *name) {
-  const AVCodec *codec = avcodec_find_encoder_by_name(name);
-  if (!codec)
-    return NULL;
-  AVCodecContext *c = avcodec_alloc_context3(codec);
-  if (!c)
-    return NULL;
-  c->width = w;
-  c->height = h;
-  c->time_base = (AVRational){1, fps};
-  c->framerate = (AVRational){fps, 1};
-  c->pix_fmt = AV_PIX_FMT_YUV420P;
-  c->gop_size = 1;
-  c->max_b_frames = 0;
-  c->flags |= AV_CODEC_FLAG_LOW_DELAY;
-  c->thread_count = 2;
-  c->color_range = AVCOL_RANGE_MPEG;
-  c->colorspace = AVCOL_SPC_BT709;
-  c->color_primaries = AVCOL_PRI_BT709;
-  c->color_trc = AVCOL_TRC_BT709;
-  AVDictionary *opts = NULL;
-  if (strstr(name, "nvenc")) {
-    av_dict_set(&opts, "preset", "p1", 0);
-    av_dict_set(&opts, "tune", "ull", 0);
-    av_dict_set(&opts, "rc", "constqp", 0);
-    const char *qp = getenv("NETDISPLAY_VR_QP");
-    if (!qp) qp = "28";
-    (void)number(qp, 0, 51);
-    av_dict_set(&opts, "qp", qp, 0);
-    av_dict_set(&opts, "zerolatency", "1", 0);
-    // zerolatency affects NVENC reordering, not FFmpeg's output FIFO.
-    av_dict_set(&opts, "delay", "0", 0);
-    av_dict_set(&opts, "rc-lookahead", "0", 0);
-    av_dict_set(&opts, "forced-idr", "1", 0);
-    av_dict_set(&opts, "aud", "1", 0);
-  } else {
-    av_dict_set(&opts, "preset", "ultrafast", 0);
-    av_dict_set(&opts, "tune", "zerolatency", 0);
-    av_dict_set(&opts, "crf", "23", 0);
-  }
-  int r = avcodec_open2(c, codec, &opts);
-  AVDictionaryEntry *unused = NULL;
-  while ((unused = av_dict_get(opts, "", unused, AV_DICT_IGNORE_SUFFIX)))
-    fprintf(stderr, "VR unused encoder option %s=%s\n", unused->key, unused->value);
-  av_dict_free(&opts);
-  if (r >= 0 && strstr(name, "nvenc")) {
-    int64_t delay = -1;
-    if (av_opt_get_int(c->priv_data, "delay", 0, &delay) < 0 || delay != 0) {
-      fprintf(stderr, "VR refusing buffered NVENC: delay=%lld (expected 0)\n", (long long)delay);
-      r = AVERROR(EINVAL);
-    } else fprintf(stderr, "VR NVENC verified delay=0, no B frames, no lookahead, all-IDR\n");
-  }
-  if (r < 0)
-    avcodec_free_context(&c);
-  return c;
 }
 int main(int argc, char **argv) {
   if (argc == 2 && !strcmp(argv[1], "--help")) {
@@ -161,12 +101,15 @@ int main(int argc, char **argv) {
   if (bind(listener, (struct sockaddr *)&local, sizeof(local)) < 0 ||
       listen(listener, 1) < 0)
     die("VR control bind");
-  AVCodecContext *enc = encoder(w, h, fps, argv[10]);
-  if (!enc) {
+  struct nd_encoder encoder;
+  const char *qp_text = getenv("NETDISPLAY_VR_QP");
+  int qp = qp_text ? number(qp_text, 0, 51) : (strstr(argv[10], "nvenc") ? 28 : 23);
+  if (nd_encoder_open(&encoder, argv[10], w, h, fps, qp, AV_PIX_FMT_YUV420P, 0) < 0) {
     fprintf(stderr, "VR encoder %s unavailable\n", argv[10]);
     close(listener);
     return 1;
   }
+  AVCodecContext *enc = encoder.context;
   if (enc->codec_id != AV_CODEC_ID_H264 && enc->codec_id != AV_CODEC_ID_HEVC) {
     fprintf(stderr, "VR encoder must be H.264 or HEVC\n");
     return 2;
@@ -176,11 +119,17 @@ int main(int argc, char **argv) {
   AVFrame *frame = av_frame_alloc();
   AVPacket *packet = av_packet_alloc();
   struct SwsContext *sws = NULL;
+  AVFrame *hw_frame = NULL;
+  if (encoder.frames) {
+    hw_frame = av_frame_alloc();
+    if (!hw_frame || av_hwframe_get_buffer(encoder.frames, hw_frame, 0) < 0)
+      return 1;
+  }
   if (!frame || !packet)
     return 1;
   frame->width = w;
   frame->height = h;
-  frame->format = enc->pix_fmt;
+  frame->format = encoder.sw_format;
   if (av_frame_get_buffer(frame, 32) < 0)
     return 1;
   struct ndvr_capture *capture = ndvr_capture_open(argv[11], w, h);
@@ -210,7 +159,7 @@ int main(int argc, char **argv) {
     if (c < 0)
       continue;
     int udp = -1;
-    struct ndvr_tx *tx = NULL;
+    struct nd_video_tx *tx = NULL;
     uint8_t stream_key[32] = {0};
     if (from.sin_addr.s_addr != peer.sin_addr.s_addr) {
       close(c);
@@ -221,32 +170,21 @@ int main(int argc, char **argv) {
     setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     struct ndc_hello hello;
-    if (expected(c, NDC_HELLO, &hello, sizeof(hello)) < 0)
+    if (ndc_recv_expected(c, NDC_HELLO, &hello, sizeof(hello)) < 0)
       goto done;
     uint32_t flags = ntohl(hello.flags),
-             mask = codec == NDC_VIDEO_HEVC ? NDC_CODEC_HEVC : NDC_CODEC_H264;
+             mask = ndc_codec_bit(codec);
     if (ntohs(hello.display_count) != 1 ||
         !(ntohl(hello.video_codecs) & mask) ||
         !(flags & NDC_FLAG_FRAME_ENCRYPT) || !(flags & NDC_FLAG_AUTH_REQUIRED))
       goto reject;
-    uint32_t selected = NDC_FLAG_AUTH_REQUIRED | NDC_FLAG_FRAME_ENCRYPT |
-                        (!strcmp(argv[9], "password") ? NDC_FLAG_PASSWORD : 0);
-    struct ndc_challenge challenge = {.flags = htonl(selected)};
-    nd_crypto_random(challenge.nonce, 16);
-    if (ndc_send_msg(c, NDC_CHALLENGE, &challenge, sizeof(challenge)) < 0)
+    struct ndc_challenge challenge;
+    if (nd_session_server_auth(c, &hello, key, !strcmp(argv[9], "password"),
+                               ND_ENCRYPTION_REQUIRED, &challenge) < 0)
       goto done;
-    struct ndc_auth auth;
-    uint8_t proof[32];
-    if (expected(c, NDC_AUTH, &auth, sizeof(auth)) < 0)
-      goto done;
-    nd_crypto_proof(proof, key, "client", hello.nonce, challenge.nonce);
-    if (!nd_crypto_verify(proof, auth.proof))
-      goto reject;
-    nd_crypto_proof(auth.proof, key, "server", hello.nonce, challenge.nonce);
-    if (ndc_send_msg(c, NDC_AUTH, &auth, sizeof(auth)) < 0)
-      goto done;
+    uint32_t selected = ntohl(challenge.flags);
     struct ndc_display display;
-    if (expected(c, NDC_DISPLAY, &display, sizeof(display)) < 0)
+    if (ndc_recv_expected(c, NDC_DISPLAY, &display, sizeof(display)) < 0)
       goto done;
     if (!ntohl(display.display_id) || ntohs(display.width) != w ||
         ntohs(display.height) != h || ntohs(display.refresh_hz) != fps) {
@@ -263,7 +201,7 @@ int main(int argc, char **argv) {
                                   .display_count = htons(1),
                                   .video_codec = htons(codec)};
     struct ndc_stream stream = {.display_id = display.display_id,
-                                .stream_id = htobe64(session),
+                                .stream_id = nd_hton64(session),
                                 .video_port = htons(video_port),
                                 .width = htons(w),
                                 .height = htons(h),
@@ -273,7 +211,7 @@ int main(int argc, char **argv) {
         ndc_send_msg(c, NDC_STREAM, &stream, sizeof(stream)) < 0)
       goto done;
     struct ndc_stream_ready ack;
-    if (expected(c, NDC_STREAM_READY, &ack, sizeof(ack)) < 0 ||
+    if (ndc_recv_expected(c, NDC_STREAM_READY, &ack, sizeof(ack)) < 0 ||
         ack.display_id != display.display_id)
       goto done;
     udp = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
@@ -284,7 +222,7 @@ int main(int argc, char **argv) {
     socklen_t sndlen = sizeof(sndbuf);
     if (getsockopt(udp, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sndlen) == 0)
       fprintf(stderr, "VR UDP SO_SNDBUF actual=%d bytes (kernel accounting, not measured latency)\n", sndbuf);
-    tx = ndvr_tx_open(udp, session, stream_key, (unsigned)fps);
+    tx = nd_video_tx_open(udp, session, stream_key, (unsigned)fps);
     if (!tx) goto done;
     uint32_t seq = 0;
     uint64_t last_frames = frames, last_bytes = 0;
@@ -342,7 +280,7 @@ int main(int argc, char **argv) {
       }
       sws = sws_getCachedContext(
           sws, w, h, bgra ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA, w, h,
-          enc->pix_fmt, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+          encoder.sw_format, SWS_FAST_BILINEAR, NULL, NULL, NULL);
       if (!sws) {
         stopping = 1;
         break;
@@ -354,7 +292,14 @@ int main(int argc, char **argv) {
       frame->pts = frames++;
       frame->pict_type = AV_PICTURE_TYPE_I;
       uint64_t encode_start = nd_now_ns();
-      if (avcodec_send_frame(enc, frame) < 0) {
+      AVFrame *input = frame;
+      if (hw_frame) {
+        if (av_frame_make_writable(hw_frame) < 0 ||
+            av_hwframe_transfer_data(hw_frame, frame, 0) < 0 ||
+            av_frame_copy_props(hw_frame, frame) < 0) goto done;
+        input = hw_frame;
+      }
+      if (avcodec_send_frame(enc, input) < 0) {
         stopping = 1;
         break;
       }
@@ -364,12 +309,12 @@ int main(int argc, char **argv) {
           goto done;
         }
         last_encode_ms = (nd_now_ns() - encode_start) / 1e6;
-        ndvr_tx_publish(tx, packet, seq++);
+        nd_video_tx_publish(tx, packet, seq++);
       }
       if (nd_now_ns() - last_report > 5000000000ULL) {
         uint64_t now = nd_now_ns();
         double seconds = (now - last_report) / 1e9;
-        struct ndvr_tx_stats st = ndvr_tx_snapshot(tx);
+        struct nd_video_tx_stats st = nd_video_tx_snapshot(tx);
         fprintf(stderr, "NDVR video encode=%.1f fps tx=%.1f Mbit/s readback=%.2f mailbox=%.2f convert=%.2f encode=%.2f send=%.2f ms complete=%llu replaced=%llu aborted=%llu eagain=%llu errors=%llu\n",
           (frames-last_frames)/seconds, (st.bytes-last_bytes)*8.0/seconds/1e6,
           last_readback_ns/1e6, last_mailbox_ms, last_convert_ms, last_encode_ms, st.last_send_ms,
@@ -384,7 +329,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "VR connection rejected: authentication, encryption, codec "
                     "or mode mismatch\n");
   done:
-    ndvr_tx_close(tx);
+    nd_video_tx_close(tx);
     sodium_memzero(stream_key, sizeof(stream_key));
     if (udp >= 0)
       close(udp);
@@ -400,7 +345,8 @@ int main(int argc, char **argv) {
   sws_freeContext(sws);
   av_packet_free(&packet);
   av_frame_free(&frame);
-  avcodec_free_context(&enc);
+  av_frame_free(&hw_frame);
+  nd_encoder_close(&encoder);
   sodium_memzero(key, sizeof(key));
   close(listener);
   return 0;

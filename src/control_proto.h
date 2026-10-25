@@ -38,6 +38,24 @@ enum ndc_video_codec {
   NDC_VIDEO_AV1 = 3,
 };
 
+static inline uint32_t ndc_codec_bit(uint16_t codec) {
+  switch (codec) {
+  case NDC_VIDEO_H264: return NDC_CODEC_H264;
+  case NDC_VIDEO_HEVC: return NDC_CODEC_HEVC;
+  case NDC_VIDEO_AV1: return NDC_CODEC_AV1;
+  default: return 0;
+  }
+}
+
+static inline const char *ndc_codec_name(uint16_t codec) {
+  switch (codec) {
+  case NDC_VIDEO_H264: return "H.264";
+  case NDC_VIDEO_HEVC: return "HEVC";
+  case NDC_VIDEO_AV1: return "AV1";
+  default: return "unknown";
+  }
+}
+
 #define NDC_DISPLAY_HAS_DPMS (1u << 0)
 #define NDC_DISPLAY_HAS_BRIGHTNESS (1u << 1)
 #define NDC_DISPLAY_DPMS_ON (1u << 2)

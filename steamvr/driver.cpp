@@ -36,7 +36,6 @@ class HMD final : public vr::ITrackedDeviceServerDriver, public vr::IVRDisplayCo
     uint32_t width = 1920, height = 1080;
     int32_t x = 0, y = 0;
     float fps = 60, ipd = .064f, fov = 90;
-    bool standby = false;
     float headHeight = 1.6f;
     std::atomic_bool running{false};
     std::thread receiver;
@@ -71,7 +70,7 @@ public:
         if (fd < 0 || bind(fd, reinterpret_cast<sockaddr *>(&local), sizeof(local)) < 0) { stop(); return false; }
         int buffer = 32 * 1024;
         (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
-        motion = {}; standby = false; lastSpatial = false; running = true;
+        motion = {}; lastSpatial = false; running = true;
         try {
             receiver = std::thread([this] {
                 while (running) {
@@ -135,8 +134,9 @@ public:
         return vr::VRInitError_None;
     }
     void Deactivate() override { std::lock_guard<std::mutex> lock(mutex); index = vr::k_unTrackedDeviceIndexInvalid; }
-    void EnterStandby() override { setStandby(true); }
-    void setStandby(bool value) { std::lock_guard<std::mutex> lock(mutex); standby = value; }
+    // This network HMD has no local hardware to power down. Keep publishing
+    // phone tracking: the device interface has no matching LeaveStandby callback.
+    void EnterStandby() override {}
     void *GetComponent(const char *name) override {
         return std::strcmp(name, vr::IVRDisplayComponent_Version) == 0 ? static_cast<vr::IVRDisplayComponent *>(this) : nullptr;
     }
@@ -154,7 +154,7 @@ public:
         }
         // Missing/limited tracking is different from unplugging the device.
         p.deviceIsConnected = motion.connected(now);
-        p.poseIsValid = !standby && motion.valid(now);
+        p.poseIsValid = motion.valid(now);
         p.result = p.poseIsValid ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange;
         p.willDriftInYaw = !m.spatial; p.shouldApplyHeadModel = false;
         if (p.poseIsValid) {
@@ -173,6 +173,7 @@ public:
     bool streaming() { std::lock_guard<std::mutex> lock(mutex); return motion.fresh(nowSeconds()); }
     void frame() {
         vr::TrackedDeviceIndex_t current;
+        bool checkRefresh = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             current = index;
@@ -193,14 +194,34 @@ public:
                 snprintf(line, sizeof(line), "NDVR rx=%llu peer=%llu ok=%llu fresh=%d age=%.3f last=%s valid=%d mode=%s ar=%u sourceAgeMs=%.2f pos=%.3f,%.3f,%.3f\n",
                     (unsigned long long)rx, (unsigned long long)rxPeer, (unsigned long long)rxOk,
                     motion.fresh(now) ? 1 : 0, now - motion.latest.received, ip,
-                    !standby && motion.valid(now), motion.latest.spatial ? "6dof" : "3dof",
+                    motion.valid(now), motion.latest.spatial ? "6dof" : "3dof",
                     motion.latest.trackingQuality, motion.latest.sourceAge * 1000,
                     motion.latest.position[0], motion.latest.position[1], motion.latest.position[2]);
                 vr::VRDriverLog()->Log(line);
                 lastLog = now;
+                checkRefresh = true;
             }
         }
         if (current != vr::k_unTrackedDeviceIndexInvalid) {
+#ifdef NETDISPLAY_VR_DIRECT
+            // Linux vrcompositor overwrites the initial driver frequency with
+            // 90 Hz. Restore the configured rate after startup (and restarts)
+            // so its pacing agrees with the capture layer's virtual display.
+            if (checkRefresh) {
+                auto props = vr::VRProperties();
+                auto c = props->TrackedDeviceToPropertyContainer(current);
+                vr::ETrackedPropertyError error = vr::TrackedProp_Success;
+                float actual = props->GetFloatProperty(c, vr::Prop_DisplayFrequency_Float, &error);
+                if (error == vr::TrackedProp_Success && std::abs(actual - fps) > .01f) {
+                    props->SetFloatProperty(c, vr::Prop_DisplayFrequency_Float, fps);
+                    char line[128];
+                    snprintf(line, sizeof(line), "NDVR restored display frequency %.1f -> %.1f Hz\n", actual, fps);
+                    vr::VRDriverLog()->Log(line);
+                }
+            }
+#else
+            (void)checkRefresh;
+#endif
             bool spatial;
             { std::lock_guard<std::mutex> lock(mutex); spatial = motion.latest.spatial; }
             if (spatial != lastSpatial) {
@@ -261,8 +282,8 @@ public:
     const char *const *GetInterfaceVersions() override { return vr::k_InterfaceVersions; }
     void RunFrame() override {} // Tracking has its own receive/publish thread.
     bool ShouldBlockStandbyMode() override { return hmd.streaming(); }
-    void EnterStandby() override { hmd.setStandby(true); }
-    void LeaveStandby() override { hmd.setStandby(false); }
+    void EnterStandby() override {}
+    void LeaveStandby() override {}
 };
 Provider provider;
 }

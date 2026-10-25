@@ -23,6 +23,8 @@ int main(int argc, char **argv) {
     char name[256]{};
     system->GetStringTrackedDeviceProperty(0, vr::Prop_TrackingSystemName_String, name, sizeof(name), &pe);
     printf("trackingSystem=%s propertyError=%d\n", name, pe);
+    float frequency = system->GetFloatTrackedDeviceProperty(0, vr::Prop_DisplayFrequency_Float, &pe);
+    printf("displayFrequency=%.1f Hz propertyError=%d\n", frequency, pe);
     auto universe = system->GetUint64TrackedDeviceProperty(0, vr::Prop_CurrentUniverseId_Uint64, &pe);
     printf("universe=%llu propertyError=%d (NetDisplay expects 20036)\n", (unsigned long long)universe, pe);
     char chaperone[8192]{};

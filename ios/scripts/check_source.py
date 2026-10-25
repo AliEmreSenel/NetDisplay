@@ -13,6 +13,7 @@ text=project.read_text()
 for folder in ('App','Core'):
     for path in (root/folder).glob('*.swift'):
         assert str(path.relative_to(root)) in text, f'Missing Xcode source: {path}'
+assert '../src/frame_receiver.c' in text
 assert '../src/crypto.c' in text and 'App/Viewer.metal' in text
 assert '"IPHONEOS_DEPLOYMENT_TARGET" = "17.0"' in text, 'Hardware-decoder requirement keys need iOS 17'
 assert 'CODE_SIGNING_ALLOWED' in text

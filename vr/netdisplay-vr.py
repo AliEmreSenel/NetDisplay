@@ -55,12 +55,19 @@ def configure(a):
 def install():
     require_stopped()
     if not CONFIG.exists():raise RuntimeError('Run configure first')
-    runtime, settings=paths(); compositor=runtime/'bin/linux64/vrcompositor';original=compositor.with_name('vrcompositor.netdisplay-original')
+    runtime, settings=paths(); compositor=runtime/'bin/linux64/vrcompositor';original=compositor.parent/'netdisplay-original/vrcompositor'
+    legacy=compositor.with_name('vrcompositor.netdisplay-original')
     wrapper=PACKAGE/'compositor-wrapper'
     if STATE.exists():
-        if compositor.is_symlink() and compositor.resolve()==wrapper:print('VR integration already installed');return
+        if compositor.is_symlink() and compositor.resolve()==wrapper:
+            if legacy.exists():
+                if original.exists():raise RuntimeError('Both compositor backups exist; refusing to overwrite either')
+                original.parent.mkdir(exist_ok=True)
+                legacy.rename(original)
+            if not original.is_file():raise RuntimeError('Original compositor backup is missing')
+            print('VR integration already installed; compositor executable name preserved');return
         raise RuntimeError('SteamVR changed after installation; restore before reinstalling')
-    if compositor.is_symlink() or original.exists():raise RuntimeError('Another compositor wrapper or backup exists; refusing to overwrite it')
+    if compositor.is_symlink() or original.exists() or legacy.exists():raise RuntimeError('Another compositor wrapper or backup exists; refusing to overwrite it')
     data=json.loads(settings.read_text()) if settings.exists() else {}
     changes=[('steamvr','forcedDriver','netdisplay_vr'),('steamvr','enableLinuxVulkanAsync',False),('steamvr','disableAsyncReprojection',True),('driver_netdisplay','enable',False)]
     saved=[]
@@ -69,6 +76,7 @@ def install():
         saved.append(dict(section=section,key=key,present=key in old,value=old.get(key),installed=value));old[key]=value
     write_json(STATE,dict(runtime=str(runtime),settings=str(settings),saved=saved))
     try:
+        original.parent.mkdir(exist_ok=True)
         compositor.rename(original);compositor.symlink_to(wrapper)
         write_json(settings,data)
         subprocess.run([str(runtime/'bin/linux64/vrpathreg'),'adddriver',str(PACKAGE/'driver')],check=True)
@@ -79,8 +87,12 @@ def install():
 def restore():
     require_stopped()
     if not STATE.exists():print('No NetDisplay VR integration installed');return
-    state=json.loads(STATE.read_text());runtime=Path(state['runtime']);p=runtime/'bin/linux64/vrcompositor';original=p.with_name('vrcompositor.netdisplay-original')
+    state=json.loads(STATE.read_text());runtime=Path(state['runtime']);p=runtime/'bin/linux64/vrcompositor';original=p.parent/'netdisplay-original/vrcompositor'
+    legacy=p.with_name('vrcompositor.netdisplay-original')
+    if original.exists() and legacy.exists():raise RuntimeError('Both compositor backups exist; refusing ambiguous restore')
+    if not original.exists():original=legacy
     if p.is_symlink() and p.resolve()==PACKAGE/'compositor-wrapper':
+        if not original.is_file():raise RuntimeError('Original compositor backup is missing; wrapper retained')
         p.unlink();original.rename(p)
     elif original.exists():
         raise RuntimeError('SteamVR compositor was replaced externally; original backup retained for manual review')

@@ -27,7 +27,7 @@ final class UDPReceiver {
         let reader = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         reader.setEventHandler { [weak self] in
             guard let self = self else { return }
-            var packet = [UInt8](repeating: 0, count: 1473)
+            var packet = [UInt8](repeating: 0, count: NDProtocol.udpPayloadMax + 1)
             // Bound each callback; another ready event drains any remaining data.
             for _ in 0..<256 {
                 var addr = sockaddr_in(), size = socklen_t(MemoryLayout<sockaddr_in>.size)

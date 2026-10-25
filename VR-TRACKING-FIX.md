@@ -84,10 +84,14 @@ development files, Vulkan development files, libdrm development files and X11/XR
 headers. The CI job lists the concrete package names. This is the dedicated VR
 build, not `cmake -S steamvr` and not the normal desktop server.
 
-Use the existing installed wrapper; an in-place rebuild does not require
+When upgrading an installation that used `vrcompositor.netdisplay-original`,
+exit SteamVR and run `python3 build-vr/netdisplay-vr/netdisplay-vr install`
+after rebuilding. This migrates the original binary to
+`bin/linux64/netdisplay-original/vrcompositor`, preserving its executable name
+so SteamVR recognizes the compositor. Later in-place rebuilds do not require
 `install` again. If you intentionally move the package, restore the old wrapper
-using the old launcher before registering the new package. The installation
-manager's backup/restore logic is unchanged.
+using the old launcher before registering the new package. Restoration supports
+both backup locations.
 
 In the iPhone app choose VR, 1280x720, 60 fps, and the existing VR control port
 (default 5021), existing video credentials and motion token/port. Enable encrypted

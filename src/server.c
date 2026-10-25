@@ -4,11 +4,13 @@
 
 #include "common.h"
 #include "crypto.h"
+#include "session.h"
 #include "display_state.h"
 #include "proto.h"
 #include "network_test.h"
 #include "power_native.h"
 #include "video_sender.h"
+#include "encoder.h"
 #include <dirent.h>
 #include <linux/input.h>
 #include "touch_input.h"
@@ -634,19 +636,6 @@ fail:
   return -1;
 }
 
-static int recv_expected(int fd, uint16_t expected, void *payload,
-                         uint32_t expected_len) {
-  uint32_t len = expected_len;
-  uint16_t type = 0;
-  int r = ndc_recv_msg(fd, &type, payload, &len);
-  if (r <= 0 || type != expected || len != expected_len) {
-    if (r > 0)
-      errno = EPROTO;
-    return -1;
-  }
-  return 0;
-}
-
 static int run_stream_hook(const struct host_cfg *cfg, const char *peer,
                            const struct server_stream *st, const char *cmd) {
   char vars[10][256];
@@ -718,7 +707,7 @@ static void *session_main(void *opaque) {
   nd_power_sink_init(&power_sink);
 
   struct ndc_hello hello;
-  if (recv_expected(c, NDC_HELLO, &hello, sizeof(hello)) < 0)
+  if (ndc_recv_expected(c, NDC_HELLO, &hello, sizeof(hello)) < 0)
     goto done;
   uint32_t requested = ntohl(hello.flags);
   uint32_t client_codecs = ntohl(hello.video_codecs) & NDC_CODEC_ALL;
@@ -728,42 +717,19 @@ static void *session_main(void *opaque) {
     goto done;
   count = advertised_count;
 
-  int wants_encryption = !!(requested & NDC_FLAG_FRAME_ENCRYPT);
-  if ((wants_encryption && cfg->frame_encryption == 0) ||
-      (!wants_encryption && cfg->frame_encryption == 2) ||
-      (wants_encryption && !cfg->have_psk)) {
-    (void)ndc_send_msg(c, NDC_REJECT, NULL, 0);
+  struct ndc_challenge challenge;
+  if (nd_session_server_auth(c, &hello, cfg->have_psk ? cfg->psk : NULL,
+                             cfg->password_auth, cfg->frame_encryption,
+                             &challenge) < 0) {
+    fprintf(stderr, "receiver %s authentication/encryption negotiation failed\n",
+            ctx->peer);
     goto done;
   }
-  int encrypted = wants_encryption && cfg->frame_encryption != 0;
-  struct ndc_challenge challenge = {
-      .flags = htonl((cfg->have_psk ? NDC_FLAG_HAVE_PSK : 0) |
-                     (cfg->password_auth ? NDC_FLAG_PASSWORD : 0) |
-                     (encrypted ? NDC_FLAG_FRAME_ENCRYPT : 0)),
-  };
-  nd_crypto_random(challenge.nonce, sizeof(challenge.nonce));
-  if (ndc_send_msg(c, NDC_CHALLENGE, &challenge, sizeof(challenge)) < 0)
-    goto done;
-  if (cfg->have_psk) {
-    struct ndc_auth got, reply;
-    uint8_t expected[NDC_AUTH_SIZE];
-    if (recv_expected(c, NDC_AUTH, &got, sizeof(got)) < 0)
-      goto done;
-    nd_crypto_proof(expected, cfg->psk, "client", hello.nonce, challenge.nonce);
-    if (!nd_crypto_verify(got.proof, expected)) {
-      fprintf(stderr, "receiver %s authentication failed\n", ctx->peer);
-      (void)ndc_send_msg(c, NDC_REJECT, NULL, 0);
-      goto done;
-    }
-    nd_crypto_proof(reply.proof, cfg->psk, "server", hello.nonce,
-                    challenge.nonce);
-    if (ndc_send_msg(c, NDC_AUTH, &reply, sizeof(reply)) < 0)
-      goto done;
-  }
+  int encrypted = !!(ntohl(challenge.flags) & NDC_FLAG_FRAME_ENCRYPT);
 
   for (unsigned i = 0; i < count; i++) {
     struct ndc_display d;
-    if (recv_expected(c, NDC_DISPLAY, &d, sizeof(d)) < 0)
+    if (ndc_recv_expected(c, NDC_DISPLAY, &d, sizeof(d)) < 0)
       goto done;
     d.connector[NDC_NAME_MAX - 1] = 0;
     struct server_stream *st = &streams[i];
@@ -807,8 +773,7 @@ static void *session_main(void *opaque) {
   for (size_t ci = 0; ci < codec_count && !video_codec; ci++) {
     uint16_t candidate_codec = codec_order[ci];
     uint32_t candidate_bit =
-        candidate_codec == NDC_VIDEO_AV1 ? NDC_CODEC_AV1 :
-        candidate_codec == NDC_VIDEO_HEVC ? NDC_CODEC_HEVC : NDC_CODEC_H264;
+        ndc_codec_bit(candidate_codec);
     if (!(client_codecs & candidate_bit))
       continue;
 
@@ -915,7 +880,7 @@ static void *session_main(void *opaque) {
 
   for (unsigned ready = 0; ready < count; ready++) {
     struct ndc_stream_ready r;
-    if (recv_expected(c, NDC_STREAM_READY, &r, sizeof(r)) < 0)
+    if (ndc_recv_expected(c, NDC_STREAM_READY, &r, sizeof(r)) < 0)
       goto done;
     uint32_t id = ntohl(r.display_id);
     struct server_stream *st = NULL;

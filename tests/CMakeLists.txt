@@ -5,9 +5,24 @@ function(nd_add_test target source name)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
 endfunction()
 
+add_executable(netdisplay-ios-wire-test ../ios/Native/NDNative.c ../ios/Tests/wire_test.c)
+target_include_directories(netdisplay-ios-wire-test PRIVATE ../ios/Native)
+target_link_libraries(netdisplay-ios-wire-test PRIVATE nd_protocol)
+add_test(NAME ios-wire-compatibility COMMAND netdisplay-ios-wire-test)
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME protocol-constants COMMAND "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tools/generate-wire.py" --check)
+endif()
+
+if(TARGET nd_video AND NOT TARGET netdisplay-video-tx-test)
+    include(../cmake/NetDisplayVideoTests.cmake)
+endif()
+
 nd_add_test(netdisplay-transport-test transport_test.c frame-transport)
 nd_add_test(netdisplay-network-test network_test.c bidirectional-network-probe)
 nd_add_test(netdisplay-crypto-test crypto_test.c crypto-roundtrip)
+nd_add_test(netdisplay-session-test session_test.c session-authentication)
 nd_add_test(netdisplay-power-test power_test.c power-telemetry)
 nd_add_test(netdisplay-input-test input_test.c receiver-input)
 

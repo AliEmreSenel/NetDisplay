@@ -9,7 +9,8 @@ int main() {
         catch (const std::invalid_argument &) {}
     }
     const auto text = ndvr::stationaryChaperone(1.65);
-    if (text.find("\"universeID\":20036") == std::string::npos ||
+    if (text.find("\"jsonid\":\"chaperone_info\"") == std::string::npos ||
+        text.find("\"universeID\":20036") == std::string::npos ||
         text.find("\"translation\":[0,1.65,0]") == std::string::npos ||
         text.find("\"collision_bounds\":[]") == std::string::npos) return 1;
     std::cout << text << '\n';

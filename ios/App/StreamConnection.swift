@@ -70,20 +70,20 @@ final class StreamConnection {
             status("Connecting")
             fd = try SocketIO.connectTCP(host: settings.host, port: UInt16(settings.controlPort), lifetime: lifetime)
             let localIP = try SocketIO.localIP(fd)
-            let cn = Crypto.random(16)
-            var codecMask: UInt32 = 1
-            if settings.allowHEVC && VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) { codecMask |= 2 }
+            let cn = Crypto.random(NDProtocol.nonceSize)
+            var codecMask: UInt32 = VideoCodecs.h264
+            if settings.allowHEVC && VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) { codecMask |= VideoCodecs.hevc }
             try SocketIO.sendMessage(fd, ControlMessage(.hello, Wire.hello(nonce: Data(cn),
                 encrypt: settings.encryptVideo, haveKey: !key.isEmpty, codecs: codecMask, touch: settings.viewerPurpose == .touch)))
             let challenge = try SocketIO.readMessage(fd)
             try challenge.require(.challenge, size: 20)
             var cr = ByteReader(challenge.payload)
-            let flags = try cr.u32(), sn = Array(try cr.take(16))
-            let requiresAuth = (flags & 4) != 0, usesPassword = (flags & 8) != 0
+            let flags = try cr.u32(), sn = Array(try cr.take(NDProtocol.nonceSize))
+            let requiresAuth = (flags & ControlFlags.authRequired) != 0, usesPassword = (flags & ControlFlags.password) != 0
             guard requiresAuth == !key.isEmpty else {
                 throw NDError.message(requiresAuth ? "Server requires authentication; enter its password/key" : "Server is unauthenticated; explicitly select No authentication or secure the server")
             }
-            guard ((flags & 2) != 0) == settings.encryptVideo else { throw NDError.message("Server/client video encryption settings do not match") }
+            guard ((flags & ControlFlags.frameEncrypt) != 0) == settings.encryptVideo else { throw NDError.message("Server/client video encryption settings do not match") }
             if requiresAuth && settings.authMode == .password && !usesPassword {
                 throw NDError.message("Server uses a PSK, not a password. Select 32-byte key (hex).")
             }
@@ -102,10 +102,12 @@ final class StreamConnection {
             let welcome = try SocketIO.readMessage(fd); try welcome.require(.welcome, size: 8)
             var wr = ByteReader(welcome.payload)
             let selectedFlags = try wr.u32(), count = try wr.u16(), codec = try wr.u16()
-            guard count == 1, codec == 1 || (codec == 2 && codecMask & 2 != 0),
-                  ((selectedFlags & 2) != 0) == settings.encryptVideo,
-                  selectedFlags & 16 == 0 else { throw NDError.message("Unsupported server negotiation") }
-            let touchAllowed = settings.viewerPurpose == .touch && selectedFlags & 65 == 65
+            guard count == 1, codec == VideoCodec.h264.rawValue ||
+                    (codec == VideoCodec.hevc.rawValue && codecMask & VideoCodecs.hevc != 0),
+                  ((selectedFlags & ControlFlags.frameEncrypt) != 0) == settings.encryptVideo,
+                  selectedFlags & ControlFlags.networkTest == 0 else { throw NDError.message("Unsupported server negotiation") }
+            let touchFlags = ControlFlags.inputAllowed | ControlFlags.touchscreen
+            let touchAllowed = settings.viewerPurpose == .touch && selectedFlags & touchFlags == touchFlags
             let streamMessage = try SocketIO.readMessage(fd); try streamMessage.require(.stream, size: 84)
             let stream = try StreamDescription(streamMessage.payload)
             guard stream.width == width, stream.height == height, stream.fps == UInt16(settings.fps) else {
@@ -114,14 +116,14 @@ final class StreamConnection {
             var streamKey: [UInt8]? = settings.encryptVideo
                 ? Crypto.streamKey(key: key, session: stream.sessionID, client: cn, server: sn) : nil
             defer { if streamKey != nil { Crypto.wipe(&streamKey!) } }
-            let video = VideoDecoder(hevc: codec == 2, width: stream.width, height: stream.height, fps: stream.fps,
+            let video = VideoDecoder(hevc: codec == VideoCodec.hevc.rawValue, width: stream.width, height: stream.height, fps: stream.fps,
                 frames: frames, generation: generation, diagnostics: diagnostics)
             decoder = video
             receiver = try UDPReceiver(localIP: localIP, host: settings.host, port: stream.port,
                 session: stream.sessionID, key: streamKey, diagnostics: diagnostics) { [weak video] in video?.submit($0) }
             try SocketIO.sendMessage(fd, ControlMessage(.streamReady, Wire.streamReady()))
             SocketIO.timeout(fd, seconds: 5)
-            let info = ConnectedInfo(localIP: localIP, stream: stream, codec: codec == 2 ? "HEVC" : "H.264", encrypted: settings.encryptVideo, touchAllowed: touchAllowed)
+            let info = ConnectedInfo(localIP: localIP, stream: stream, codec: codec == VideoCodec.hevc.rawValue ? "HEVC" : "H.264", encrypted: settings.encryptVideo, touchAllowed: touchAllowed)
             inputLock.lock(); inputAllowed = touchAllowed; inputLock.unlock()
             DispatchQueue.main.async { [weak self] in self?.onConnected?(info) }
             var pingTime: UInt64 = 0, lastPing: UInt64 = 0, lastPong = nd_ios_now_ns()

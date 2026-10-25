@@ -18,7 +18,7 @@ inline std::string stationaryChaperone(double headHeight) {
     gmtime_r(&now, &utc);
     char date[32]; std::strftime(date, sizeof(date), "%Y-%m-%dT%H:%M:%SZ", &utc);
     std::ostringstream out; out.imbue(std::locale::classic());
-    out << "{\"json_id\":\"chaperone_info\",\"version\":5,\"time\":\"" << date
+    out << "{\"jsonid\":\"chaperone_info\",\"version\":5,\"time\":\"" << date
         << "\",\"universes\":[{\"universeID\":" << universeId
         << ",\"collision_bounds\":[],\"play_area\":[1.0,1.0],"
            "\"standing\":{\"translation\":[0,0,0],\"yaw\":0},"

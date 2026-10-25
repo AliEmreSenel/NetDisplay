@@ -4,6 +4,7 @@
 
 #include "common.h"
 #include "crypto.h"
+#include "session.h"
 #include "proto.h"
 #include "network_test.h"
 #include "power_state.h"
@@ -794,19 +795,6 @@ struct client_stream_runtime {
   int state_fd;
 };
 
-static int recv_control(int fd, uint16_t expected, void *payload,
-                        uint32_t size) {
-  uint16_t type = 0;
-  uint32_t len = size;
-  int r = ndc_recv_msg(fd, &type, payload, &len);
-  if (r <= 0 || type != expected || len != size) {
-    if (r > 0)
-      errno = type == NDC_REJECT ? EACCES : EPROTO;
-    return -1;
-  }
-  return 0;
-}
-
 int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
   self_program = argv[0];
@@ -935,7 +923,7 @@ int main(int argc, char **argv) {
     int session_ok = ndc_send_msg(s, NDC_HELLO, &hello, sizeof(hello)) == 0;
     struct ndc_challenge challenge;
     if (session_ok &&
-        recv_control(s, NDC_CHALLENGE, &challenge, sizeof(challenge)) < 0)
+        ndc_recv_expected(s, NDC_CHALLENGE, &challenge, sizeof(challenge)) < 0)
       session_ok = 0;
     uint32_t server_flags = session_ok ? ntohl(challenge.flags) : 0;
     int server_requires_auth = !!(server_flags & NDC_FLAG_AUTH_REQUIRED);
@@ -974,23 +962,12 @@ int main(int argc, char **argv) {
       session_ok = 0;
     }
     if (session_ok && cfg.have_psk) {
-      struct ndc_auth auth, reply;
-      nd_crypto_proof(auth.proof, cfg.psk, "client", hello.nonce,
-                      challenge.nonce);
-      if (ndc_send_msg(s, NDC_AUTH, &auth, sizeof(auth)) < 0 ||
-          recv_control(s, NDC_AUTH, &reply, sizeof(reply)) < 0)
+      if (nd_session_client_auth(s, cfg.psk, &hello, &challenge) < 0)
         session_ok = 0;
-      if (session_ok) {
-        uint8_t expected[NDC_AUTH_SIZE];
-        nd_crypto_proof(expected, cfg.psk, "server", hello.nonce,
-                        challenge.nonce);
-        if (!nd_crypto_verify(reply.proof, expected)) {
-          errno = EACCES;
-          session_ok = 0;
-        } else
-          authenticated = 1;
-      }
+      else
+        authenticated = 1;
     }
+
     if (!session_ok && prompted_password && !authenticated) {
       explicit_bzero(cfg.psk, sizeof(cfg.psk));
       cfg.have_psk = 0;
@@ -1010,7 +987,7 @@ int main(int argc, char **argv) {
     }
     struct ndc_welcome welcome;
     if (session_ok &&
-        recv_control(s, NDC_WELCOME, &welcome, sizeof(welcome)) < 0)
+        ndc_recv_expected(s, NDC_WELCOME, &welcome, sizeof(welcome)) < 0)
       session_ok = 0;
     uint16_t video_codec = session_ok ? ntohs(welcome.video_codec) : 0;
     int input_allowed =
@@ -1024,7 +1001,7 @@ int main(int argc, char **argv) {
       session_ok = 0;
     for (int i = 0; session_ok && i < display_count; i++) {
       struct ndc_stream wire;
-      if (recv_control(s, NDC_STREAM, &wire, sizeof(wire)) < 0) {
+      if (ndc_recv_expected(s, NDC_STREAM, &wire, sizeof(wire)) < 0) {
         session_ok = 0;
         break;
       }

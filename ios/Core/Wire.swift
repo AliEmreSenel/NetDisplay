@@ -40,20 +40,15 @@ struct ByteReader {
     }
 }
 
-enum ControlType: UInt16 {
-    case hello = 1, welcome = 2, input = 3, ping = 4, pong = 5, stop = 6
-    case ready = 7, displayState = 8, challenge = 9, auth = 10, display = 11
-    case stream = 12, streamReady = 13, reject = 14
-}
 struct ControlMessage {
-    static let magic: UInt32 = 0x4e444333
-    static let version: UInt16 = 6
+    static let magic: UInt32 = NDProtocol.controlMagic
+    static let version: UInt16 = NDProtocol.version
     let type: UInt16
     let payload: Data
     init(_ type: ControlType, _ payload: Data = Data()) { self.type = type.rawValue; self.payload = payload }
     init(rawType: UInt16, payload: Data) { self.type = rawType; self.payload = payload }
     var encoded: Data {
-        precondition(payload.count <= 512)
+        precondition(payload.count <= NDProtocol.maxPayload)
         var w = ByteWriter(); w.u32(Self.magic); w.u16(Self.version)
         w.u16(type); w.u32(UInt32(payload.count)); w.data.append(payload)
         return w.data
@@ -65,7 +60,7 @@ struct ControlMessage {
         let v = try r.u16()
         guard v == version else { throw NDError.message("Server protocol v\(v); this app requires NetDisplay v6") }
         let t = try r.u16(), n = try r.u32()
-        guard n <= 512 else { throw NDError.message("Oversized control message") }
+        guard n <= UInt32(NDProtocol.maxPayload) else { throw NDError.message("Oversized control message") }
         return (t, Int(n))
     }
     func require(_ expected: ControlType, size: Int) throws {
@@ -86,7 +81,7 @@ struct StreamDescription {
         var r = ByteReader(payload)
         displayID = try r.u32(); sessionID = try r.u64(); port = try r.u16()
         width = try r.u16(); height = try r.u16(); fps = try r.u16()
-        outputName = try r.fixedString(64)
+        outputName = try r.fixedString(NDProtocol.nameMax)
         guard displayID == 1, sessionID != 0, port != 0,
               width > 0, width <= 4096, width % 2 == 0,
               height > 0, height <= 2160, height % 2 == 0, fps > 0, fps <= 60 else {
@@ -96,15 +91,18 @@ struct StreamDescription {
 }
 enum Wire {
     static func hello(nonce: Data, encrypt: Bool, haveKey: Bool, codecs: UInt32, touch: Bool = false) -> Data {
-        precondition(nonce.count == 16)
+        precondition(nonce.count == NDProtocol.nonceSize)
         var w = ByteWriter()
         // Touch is an optional v6 extension; old hosts do not acknowledge it.
-        w.u32((encrypt ? 2 : 0) | (haveKey ? 4 : 0) | (touch ? 65 : 0)); w.u16(1); w.u16(0)
+        let flags = (encrypt ? ControlFlags.frameEncrypt : 0)
+            | (haveKey ? ControlFlags.authRequired : 0)
+            | (touch ? ControlFlags.wantInput | ControlFlags.touchscreen : 0)
+        w.u32(flags); w.u16(1); w.u16(0)
         w.u32(codecs); w.data.append(nonce); return w.data
     }
     static func display(width: UInt16, height: UInt16, fps: UInt16) -> Data {
         var w = ByteWriter(); w.u32(1); w.u16(width); w.u16(height); w.u16(fps)
-        w.u16(0); w.fixedString("iPhone", count: 64); return w.data
+        w.u16(0); w.fixedString("iPhone", count: NDProtocol.nameMax); return w.data
     }
     static func streamReady() -> Data { var w = ByteWriter(); w.u32(1); return w.data }
 }
