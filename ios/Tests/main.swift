@@ -17,7 +17,7 @@ check(try r.f32() == 1.25, "float")
 rejects("short read") { _ = try r.u16() }
 let hello = Wire.hello(nonce: Data(0..<16), encrypt: true, haveKey: true, codecs: 1)
 check(hello.count == 28, "v6 HELLO size")
-check(Array(hello.prefix(12)) == [0,0,0,6,0,1,0,0,0,0,0,1], "HELLO capabilities and byte order")
+check(Array(hello.prefix(12)) == [0,0,0,134,0,1,0,0,0,0,0,1], "HELLO capabilities and byte order")
 let packet = ControlMessage(.hello, hello).encoded
 let header = try ControlMessage.decodeHeader(Data(packet.prefix(12)))
 check(header.type == 1 && header.count == 28, "control header")

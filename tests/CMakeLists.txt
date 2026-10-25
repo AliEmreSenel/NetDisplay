@@ -34,4 +34,7 @@ if(NETDISPLAY_BUILD_SERVER)
     add_test(NAME bandwidth-control-sessions COMMAND netdisplay-control-test
         $<TARGET_FILE:netdisplay-server> bandwidth)
     set_tests_properties(bandwidth-control-sessions PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+    add_test(NAME all-intra-control-sessions COMMAND netdisplay-control-test
+        $<TARGET_FILE:netdisplay-server> all-intra)
+    set_tests_properties(all-intra-control-sessions PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
 endif()

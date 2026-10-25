@@ -9,6 +9,8 @@
 #include <signal.h>
 #include <sys/stat.h>
 
+static int prediction_enabled = 1;
+
 static int reserve_port(void) {
   int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0)
@@ -61,7 +63,7 @@ static int open_session(int port, uint32_t display_id, int advertises_key,
     return -1;
   struct ndc_hello hello = {
       .flags = htonl((advertises_key ? NDC_FLAG_HAVE_PSK : 0) |
-                     (advertises_key ? NDC_FLAG_NETWORK_TEST | NDC_FLAG_POWER_INFO : 0) |
+                     (advertises_key ? NDC_FLAG_NETWORK_TEST | NDC_FLAG_POWER_INFO | NDC_FLAG_PREDICTED_VIDEO : 0) |
                      NDC_FLAG_FRAME_ENCRYPT),
       .display_count = htons(1),
       .video_codecs = htonl(NDC_CODEC_ALL),
@@ -112,6 +114,8 @@ static int open_session(int port, uint32_t display_id, int advertises_key,
     goto fail;
   if (!!(ntohl(welcome.flags) & NDC_FLAG_NETWORK_TEST) != !!advertises_key)
     goto fail;
+  if (!!(ntohl(welcome.flags) & NDC_FLAG_PREDICTED_VIDEO) != (advertises_key && prediction_enabled))
+    goto fail;
   if (advertises_key) {
     uint8_t key[ND_KEY_SIZE];
     nd_crypto_stream_key(key, psk, nd_ntoh64(stream.stream_id), hello.nonce,
@@ -127,8 +131,9 @@ fail:
 }
 
 int main(int argc, char **argv) {
-  if (argc != 2 && !(argc == 3 && !strcmp(argv[2], "bandwidth")))
+  if (argc != 2 && !(argc == 3 && (!strcmp(argv[2], "bandwidth") || !strcmp(argv[2], "all-intra"))))
     return 2;
+  prediction_enabled = argc != 3 || strcmp(argv[2], "all-intra");
   if (sodium_init() < 0)
     return 2;
   int port = -1;
@@ -155,7 +160,8 @@ int main(int argc, char **argv) {
                    "brightness_device=none\npassword_key=%s\n"
                    "frame_encryption=allowed\n%s",
                    port, port + 1, password_key,
-                   argc == 3 ? "rate_control=bandwidth\nbitrate_kbps=20000\n" : "");
+                   !prediction_enabled ? "keyframe_interval=1\n" :
+                   argc == 3 ? "rate_control=bandwidth\nbitrate_kbps=20000\nkeyframe_interval=2\n" : "");
   if (write(config, text, (size_t)n) != n) {
     close(config);
     unlink(path);

@@ -6,13 +6,24 @@
 #include <stdint.h>
 
 #define ND_MAGIC 0x4e443031u /* "ND01" */
+#define ND_VIDEO_MAGIC 0x4e443032u /* "ND02": prediction metadata */
+#define ND_VIDEO_KEYFRAME 1u
+#define ND_VIDEO_QUEUE_CAPACITY 3u
 #define ND_PORT 5000
 #define ND_DEFAULT_W 1920u
 #define ND_DEFAULT_H 1080u
 #define ND_DEFAULT_FPS 60u
 #define ND_UDP_PAYLOAD_MAX 1472u
 #define ND_MAX_FRAME (4u * 1024u * 1024u)
-#define ND_MAX_WIRE_FRAME (ND_MAX_FRAME + 16u)
+#define ND_MAX_WIRE_FRAME (ND_MAX_FRAME + 12u + 16u)
+
+/* Present only in negotiated ND02 frames, inside the encryption envelope.
+ * reference is seq for a keyframe, seq-1 for a dependent access unit. It is
+ * a conservative decode prerequisite, not a codec reference-list description. */
+struct nd_video_meta {
+    uint32_t magic, flags, reference;
+};
+_Static_assert(sizeof(struct nd_video_meta) == 12, "video metadata must stay 12 bytes");
 
 struct __attribute__((packed)) nd_hdr {
     uint32_t magic;

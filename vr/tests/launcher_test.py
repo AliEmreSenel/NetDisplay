@@ -24,11 +24,19 @@ with tempfile.TemporaryDirectory() as temporary:
     assert v['backend']['key_file']=='unchanged-secret-path' and h['tokenFile']=='unchanged-token-path'
     assert v['backend']['width']==1280 and v['steamvr_hmd_init_config']['eye_resolution_width']==640
     assert h['frequency']==60 and h['headHeight']==1.65
-    before=m.CONFIG.read_bytes()
+    before=m.CONFIG.read_bytes();settings_before=settings.read_bytes()
     try:m.tune(SimpleNamespace(width=1281,height=None,fps=None,qp=None,encoder=None,head_height=None))
     except ValueError:pass
     else:raise AssertionError('accepted odd width')
     assert m.CONFIG.read_bytes()==before
+    for bad in [0,-1,61,1.5,'3',True]:
+        try:m.tune(SimpleNamespace(keyframe_interval=bad,head_height=None))
+        except ValueError:pass
+        else:raise AssertionError(f'accepted invalid keyframe interval {bad!r}')
+        assert m.CONFIG.read_bytes()==before and settings.read_bytes()==settings_before
+    m.tune(SimpleNamespace(keyframe_interval=2,head_height=None))
+    assert json.loads(m.CONFIG.read_text())['backend']['keyframe_interval']==2
+    m.tune(SimpleNamespace(keyframe_interval=3,head_height=None))
     assert m.CONFIG.stat().st_mode & 0o777 == 0o600
     m.tune(SimpleNamespace(rate_control='bandwidth',bitrate_kbps=35000,head_height=None))
     v=json.loads(m.CONFIG.read_text())
@@ -64,6 +72,7 @@ with tempfile.TemporaryDirectory() as temporary:
                 assert m.os.environ['NETDISPLAY_VR_RATE_CONTROL']==(mode or 'qp')
                 assert m.os.environ['NETDISPLAY_VR_BITRATE_KBPS']==('20000' if mode is None else '35000')
                 assert m.os.environ['NETDISPLAY_VR_QP']=='30'
+                assert m.os.environ['NETDISPLAY_VR_KEYFRAME_INTERVAL']=='3'
 print('PASS: launcher tune, rate-control switching, preserved pairing paths, validation and file permissions')
 
 # Exercise installation, legacy migration, and restoration without SteamVR.

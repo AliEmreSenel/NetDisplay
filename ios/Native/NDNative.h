@@ -5,12 +5,13 @@
 #include <stddef.h>
 #include "crypto.h"
 #include "control_proto.h"
+#include "frame_receiver.h"
 
 typedef struct NDIOSAssembler NDIOSAssembler;
 typedef struct {
     uint64_t packets, complete, partial_drop, bad, duplicate, obsolete;
     uint64_t bytes, first_ns, complete_ns;
-    uint32_t sequence, frame_bytes;
+    uint32_t sequence, frame_bytes, reference, keyframe;
 } NDIOSStats;
 
 int nd_ios_init(void);

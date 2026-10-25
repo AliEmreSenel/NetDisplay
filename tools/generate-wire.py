@@ -44,12 +44,14 @@ def generate():
             ('authSize', 'NDC_AUTH_SIZE', 'Int'),
             ('nameMax', 'NDC_NAME_MAX', 'Int'),
             ('udpPayloadMax', 'ND_UDP_PAYLOAD_MAX', 'Int'),
+            ('videoQueueCapacity', 'ND_VIDEO_QUEUE_CAPACITY', 'Int'),
         ],
         'ControlFlags': [(swift, 'NDC_FLAG_' + c, 'UInt32') for swift, c in [
             ('wantInput', 'WANT_INPUT'), ('inputAllowed', 'INPUT_ALLOWED'),
             ('frameEncrypt', 'FRAME_ENCRYPT'), ('authRequired', 'AUTH_REQUIRED'),
             ('password', 'PASSWORD'), ('networkTest', 'NETWORK_TEST'),
             ('powerInfo', 'POWER_INFO'), ('touchscreen', 'TOUCHSCREEN'),
+            ('predictedVideo', 'PREDICTED_VIDEO'),
         ]],
         'VideoCodecs': [(swift, 'NDC_CODEC_' + c, 'UInt32') for swift, c in [
             ('h264', 'H264'), ('hevc', 'HEVC'), ('av1', 'AV1'),

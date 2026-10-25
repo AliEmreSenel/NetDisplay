@@ -32,7 +32,7 @@ The application is fully implemented source, not just view stubs. However, the *
 ```text
 Linux renderer -> Hyprland headless output -> existing NetDisplay encoder
    -> existing UDP framing (optionally encrypted) -> USB IP network
-   -> native reassembly -> one-slot decoder mailbox
+   -> native reassembly -> bounded dependency-aware decoder queue
    -> VideoToolbox hardware decoder -> NV12 CVPixelBuffer
    -> CVMetalTextureCache -> Metal eye splitting / manual lens correction
 
@@ -51,9 +51,16 @@ because the v6 server uses them; changing them would break interoperability.
 
 ### Deliberate low-latency boundaries
 
-The current sender produces intra frames, so stale complete compressed frames can be replaced without maintaining a prediction chain. If the host later switches to ordinary P/B-frame inter prediction, this policy must be redesigned around decoder reference dependencies. Do not assume arbitrary frame dropping is safe for an inter-frame stream.
+The app advertises the optional v6 prediction capability. Upgraded senders default
+to one keyframe and two P-frames (`keyframe_interval=3`); old senders still work
+with their all-intra stream. At most three compressed access units wait for
+decode. Required reference frames are decoded in order, while a new keyframe
+supersedes queued work. Overflow, missing dependencies, or decode errors abandon
+the affected chain until a keyframe; arbitrary P-frame replacement is unsafe.
+The newest decoded image is published to the renderer. The default interval
+offers recovery every 50 ms at 60 fps, provided the next keyframe arrives intact.
 
-Decoding is synchronous on a dedicated queue, with temporal-processing/asynchronous flags unset. Pending input is replaceable and there is no AVPlayer playback buffer. A decoded pixel buffer is mapped into Metal without a CPU RGB image conversion. Texture/pixel-buffer lifetimes extend through GPU completion. The renderer uses two drawable buffers and one submitted command buffer at a time. These are implementation choices, not a demonstrated latency guarantee.
+Decoding is synchronous on a dedicated queue, with temporal-processing/asynchronous flags unset. Pending input is bounded and there is no AVPlayer playback buffer. A decoded pixel buffer is mapped into Metal without a CPU RGB image conversion. Texture/pixel-buffer lifetimes extend through GPU completion. The renderer uses two drawable buffers and one submitted command buffer at a time. These are implementation choices, not a demonstrated latency guarantee.
 
 The source still performs its existing capture/encode work. This package does not add direct renderer-to-NVENC zero-copy capture, predict headset pose, or perform asynchronous timewarp. Streaming a head-tracked source without synchronized source-pose metadata is not sufficient to implement correct client-side reprojection.
 

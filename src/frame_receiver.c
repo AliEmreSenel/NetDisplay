@@ -9,6 +9,18 @@ uint64_t nd_now_ns(void) {
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
+int nd_decode_chain_accept(struct nd_decode_chain *chain, uint32_t seq,
+                           uint32_t reference, int keyframe) {
+  if (!keyframe && (!chain->valid || reference != chain->seq ||
+                    seq != reference + 1u)) {
+    chain->valid = 0;
+    return 0;
+  }
+  chain->seq = seq;
+  chain->valid = 1;
+  return 1;
+}
+
 int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
                      uint8_t *buffer, const void *packet, size_t n,
                      const uint8_t *key) {
@@ -16,10 +28,11 @@ int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
   if (n < sizeof(h) || n > ND_UDP_PAYLOAD_MAX) goto bad;
   memcpy(&h, packet, sizeof(h));
   uint64_t session = nd_ntoh64(h.session);
-  uint32_t seq = ntohl(h.seq), size = ntohl(h.frame_size);
+  uint32_t seq = ntohl(h.seq), size = ntohl(h.frame_size), magic = ntohl(h.magic);
   uint16_t frag = ntohs(h.frag), count = ntohs(h.frag_count);
-  if (ntohl(h.magic) != ND_MAGIC || !session || !size ||
-      size > (key ? ND_MAX_WIRE_FRAME : ND_MAX_FRAME) || !count ||
+  size_t max_plain = ND_MAX_FRAME + (magic == ND_VIDEO_MAGIC ? sizeof(struct nd_video_meta) : 0);
+  if ((magic != ND_MAGIC && magic != ND_VIDEO_MAGIC) || !session || !size ||
+      size > max_plain + (key ? 16u : 0u) || !count ||
       count != (size + ND_FRAG_DATA - 1) / ND_FRAG_DATA || frag >= count)
     goto bad;
   if (a->expected_session && session != a->expected_session) goto obsolete;
@@ -34,6 +47,7 @@ int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
     a->session = session;
     a->seq = seq;
     a->size = size;
+    a->magic = magic;
     a->fragments = count;
     a->count = 0;
     a->active = 1;
@@ -41,7 +55,7 @@ int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
     memset(a->got, 0, sizeof(a->got));
   } else if (!a->active || seq != a->seq) {
     goto obsolete;
-  } else if (size != a->size || count != a->fragments) goto bad;
+  } else if (size != a->size || count != a->fragments || magic != a->magic) goto bad;
   uint64_t mask = 1ull << (frag & 63u);
   if (a->got[frag >> 6] & mask) {
     atomic_fetch_add(&st->dup, 1);
@@ -55,8 +69,23 @@ int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
   if (key) {
     size_t plain;
     if (nd_crypto_decrypt(buffer, &plain, buffer, a->size, key, session, seq) < 0 ||
-        !plain || plain > ND_MAX_FRAME) goto bad;
+        !plain || plain > max_plain) goto bad;
     a->size = (uint32_t)plain;
+  }
+  a->offset = 0;
+  a->keyframe = 1;
+  a->reference = seq;
+  if (magic == ND_VIDEO_MAGIC) {
+    struct nd_video_meta meta;
+    if (a->size <= sizeof(meta)) goto bad;
+    memcpy(&meta, buffer, sizeof(meta));
+    uint32_t flags = ntohl(meta.flags), reference = ntohl(meta.reference);
+    if (ntohl(meta.magic) != ND_VIDEO_MAGIC || (flags & ~ND_VIDEO_KEYFRAME) ||
+        reference != ((flags & ND_VIDEO_KEYFRAME) ? seq : seq - 1u)) goto bad;
+    a->offset = sizeof(meta);
+    a->size -= sizeof(meta);
+    a->keyframe = !!(flags & ND_VIDEO_KEYFRAME);
+    a->reference = reference;
   }
   atomic_fetch_add(&st->complete, 1);
   atomic_fetch_add(&st->complete_bytes, a->size);

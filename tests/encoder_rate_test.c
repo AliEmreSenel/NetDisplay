@@ -17,7 +17,7 @@ enum { WIDTH = 320, HEIGHT = 180, FPS = 30, FRAMES = 120 };
  * preserving the stream's no-backlog / all-intra contract in both modes. */
 static int64_t encode(const AVCodec *codec, struct nd_encoder_rate rate) {
   struct nd_encoder encoder;
-  CHECK(nd_encoder_open(&encoder, codec->name, WIDTH, HEIGHT, FPS, &rate,
+  CHECK(nd_encoder_open(&encoder, codec->name, WIDTH, HEIGHT, FPS, 1, &rate,
                         AV_PIX_FMT_YUV420P, 1) >= 0);
   AVCodecContext *ctx = encoder.context;
   AVFrame *frame = av_frame_alloc();
@@ -68,6 +68,13 @@ static int64_t encode(const AVCodec *codec, struct nd_encoder_rate rate) {
 static int validate(void) {
   enum nd_rate_control mode;
   int bitrate;
+  unsigned interval;
+  CHECK(nd_keyframe_interval_parse("1", &interval) == 0 && interval == 1);
+  CHECK(nd_keyframe_interval_parse("3", &interval) == 0 && interval == 3);
+  CHECK(nd_keyframe_interval_parse("60", &interval) == 0 && interval == 60);
+  const char *bad_interval[] = {"", "0", "-1", "61", "1.5", "3p", "9999999999999999999"};
+  for (unsigned i = 0; i < sizeof(bad_interval) / sizeof(bad_interval[0]); i++)
+    CHECK(nd_keyframe_interval_parse(bad_interval[i], &interval) < 0);
   CHECK(nd_rate_control_parse("qp", &mode) == 0 && mode == ND_RATE_QP);
   CHECK(nd_rate_control_parse("bandwidth", &mode) == 0 &&
         mode == ND_RATE_BANDWIDTH);

@@ -24,8 +24,90 @@ static size_t packet(uint8_t *out, uint64_t session, uint32_t seq,
 
 static int cancel(void *p) { return *(int *)p; }
 
+static void prediction_queue(void) {
+  uint8_t storage[ND_VIDEO_QUEUE_CAPACITY][1], rx[1], decode[1];
+  uint8_t *buffers[ND_VIDEO_QUEUE_CAPACITY];
+  for (unsigned i = 0; i < ND_VIDEO_QUEUE_CAPACITY; i++) buffers[i] = storage[i];
+  struct nd_frame_queue queue;
+  CHECK(nd_frame_queue_init(&queue, buffers) == 0);
+  struct nd_frame_slot producer = {.buffer = rx, .seq = 9}, consumer = {.buffer = decode};
+  CHECK(nd_frame_queue_publish(&queue, &producer) == 1); /* no key yet */
+  producer.seq = 10; producer.keyframe = 1;
+  CHECK(!nd_frame_queue_publish(&queue, &producer));
+  producer.seq = 11; producer.keyframe = 0;
+  CHECK(!nd_frame_queue_publish(&queue, &producer));
+  producer.seq = 12;
+  CHECK(!nd_frame_queue_publish(&queue, &producer));
+  for (unsigned seq = 10; seq <= 12; seq++) {
+    CHECK(nd_frame_queue_take(&queue, &consumer, 0));
+    CHECK(consumer.seq == seq); /* never replace a required reference */
+  }
+  CHECK(!nd_frame_queue_pending(&queue));
+  for (unsigned seq = 13; seq <= 15; seq++) {
+    producer.seq = seq;
+    CHECK(!nd_frame_queue_publish(&queue, &producer));
+  }
+  producer.seq = 16;
+  CHECK(nd_frame_queue_publish(&queue, &producer) == 4); /* bounded overflow */
+  CHECK(!nd_frame_queue_take(&queue, &consumer, 0));
+  producer.seq = 17;
+  CHECK(nd_frame_queue_publish(&queue, &producer) == 1);
+  producer.seq = 18; producer.keyframe = 1;
+  CHECK(!nd_frame_queue_publish(&queue, &producer));
+  producer.seq = 19; producer.keyframe = 0;
+  CHECK(!nd_frame_queue_publish(&queue, &producer));
+  producer.seq = 21; producer.keyframe = 1;
+  CHECK(nd_frame_queue_publish(&queue, &producer) == 2); /* fresh I supersedes GOP */
+  CHECK(nd_frame_queue_take(&queue, &consumer, 0) && consumer.seq == 21);
+  nd_frame_queue_destroy(&queue);
+
+  struct nd_decode_chain chain = {0};
+  CHECK(!nd_decode_chain_accept(&chain, 1, 0, 0));
+  CHECK(nd_decode_chain_accept(&chain, 10, 10, 1));
+  CHECK(nd_decode_chain_accept(&chain, 11, 10, 0));
+  CHECK(!nd_decode_chain_accept(&chain, 13, 12, 0)); /* lost P */
+  CHECK(!nd_decode_chain_accept(&chain, 14, 13, 0));
+  CHECK(nd_decode_chain_accept(&chain, UINT32_MAX, UINT32_MAX, 1));
+  CHECK(nd_decode_chain_accept(&chain, 0, UINT32_MAX, 0));
+  chain.valid = 0; /* decoder failure also breaks the chain */
+  CHECK(!nd_decode_chain_accept(&chain, 1, 0, 0));
+  CHECK(nd_decode_chain_accept(&chain, 3, 3, 1));
+}
+
+static void video_metadata(int sockets[2], const uint8_t key[32], uint8_t *buffer, uint8_t *scratch) {
+  uint8_t data[ND_FRAG_DATA + 11] = {0};
+  for (int encrypted = 0; encrypted <= 1; encrypted++) {
+    for (int keyframe = 0; keyframe <= 1; keyframe++) {
+      uint8_t packets[2][ND_UDP_PAYLOAD_MAX];
+      size_t lengths[2];
+      struct nd_tx_stats tx = {0};
+      CHECK(nd_frame_send(sockets[0], 8, 4, data, sizeof(data), keyframe,
+                           encrypted ? key : NULL, scratch, NULL, NULL, &tx) == 0);
+      for (unsigned i = 0; i < 2; i++) {
+        ssize_t n = recv(sockets[1], packets[i], sizeof(packets[i]), 0);
+        CHECK(n > 0); lengths[i] = (size_t)n;
+      }
+      struct nd_assembly a = {.expected_session = 8};
+      struct nd_rx_stats st = {0};
+      for (int i = 1; i >= 0; i--)
+        CHECK(nd_frame_receive(&a, &st, buffer, packets[i], lengths[i], encrypted ? key : NULL) == (i == 0));
+      CHECK(a.keyframe == keyframe && a.reference == (keyframe ? 4u : 3u));
+      CHECK(a.size == sizeof(data) && a.offset == sizeof(struct nd_video_meta));
+      CHECK(!memcmp(buffer + a.offset, data, sizeof(data)));
+      /* Reference metadata is covered by AEAD, not merely an unauthenticated
+       * header flag. Invalid flags are also rejected in plaintext mode. */
+      packets[0][sizeof(struct nd_hdr) + 4] ^= 0x80;
+      a = (struct nd_assembly){.expected_session = 8};
+      for (unsigned i = 0; i < 2; i++)
+        CHECK(!nd_frame_receive(&a, &st, buffer, packets[i], lengths[i], encrypted ? key : NULL));
+      CHECK(atomic_load(&st.bad) == 1);
+    }
+  }
+}
+
 int main(void) {
   CHECK(sodium_init() >= 0);
+  prediction_queue();
   uint8_t data[ND_FRAG_DATA + 11], wire[ND_UDP_PAYLOAD_MAX];
   uint8_t *buffer = malloc(ND_MAX_WIRE_FRAME), *scratch = malloc(ND_MAX_WIRE_FRAME);
   CHECK(buffer && scratch);
@@ -85,11 +167,11 @@ int main(void) {
   for (int encrypted = 0; encrypted <= 1; encrypted++) {
     struct nd_tx_stats tx = {0};
     int obsolete = 1;
-    CHECK(nd_frame_send(sockets[0], 5, 0, data, sizeof(data),
+    CHECK(nd_frame_send(sockets[0], 5, 0, data, sizeof(data), -1,
                         encrypted ? key : NULL, scratch, cancel, &obsolete, &tx) == 1);
     CHECK(tx.bytes == 0);
     obsolete = 0;
-    CHECK(nd_frame_send(sockets[0], 5, 0, data, sizeof(data),
+    CHECK(nd_frame_send(sockets[0], 5, 0, data, sizeof(data), -1,
                         encrypted ? key : NULL, scratch, cancel, &obsolete, &tx) == 0);
     a = (struct nd_assembly){.expected_session = 5};
     for (int i = 0; i < 2; i++) {
@@ -106,6 +188,7 @@ int main(void) {
   n = packet(wire, 5, 1, 0, scratch, cipher_size);
   CHECK(!nd_frame_receive(&a, &st, buffer, wire, n, key));
   CHECK(atomic_load(&st.bad) == 3);
+  video_metadata(sockets, key, buffer, scratch);
   close(sockets[0]); close(sockets[1]);
   free(buffer); free(scratch);
   return 0;

@@ -913,6 +913,7 @@ int main(int argc, char **argv) {
     struct ndc_hello hello = {
         .flags = htonl((cfg.want_input ? NDC_FLAG_WANT_INPUT : 0) |
                        NDC_FLAG_NETWORK_TEST |
+                       NDC_FLAG_PREDICTED_VIDEO |
                        (cfg.send_power ? NDC_FLAG_POWER_INFO : 0) |
                        (cfg.have_psk ? NDC_FLAG_HAVE_PSK : 0) |
                        (cfg.frame_encryption ? NDC_FLAG_FRAME_ENCRYPT : 0)),

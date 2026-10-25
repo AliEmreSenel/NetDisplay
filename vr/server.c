@@ -83,6 +83,12 @@ int main(int argc, char **argv) {
   const char *rate_mode = getenv("NETDISPLAY_VR_RATE_CONTROL");
   const char *bitrate = getenv("NETDISPLAY_VR_BITRATE_KBPS");
   const char *qp = getenv("NETDISPLAY_VR_QP");
+  const char *interval = getenv("NETDISPLAY_VR_KEYFRAME_INTERVAL");
+  unsigned keyframe_interval = ND_DEFAULT_KEYFRAME_INTERVAL;
+  if (interval && nd_keyframe_interval_parse(interval, &keyframe_interval) < 0) {
+    fprintf(stderr, "NETDISPLAY_VR_KEYFRAME_INTERVAL must be 1..%u\n", ND_MAX_KEYFRAME_INTERVAL);
+    return 2;
+  }
   if (qp) rate.qp = number(qp, 0, 51);
   if ((rate_mode && nd_rate_control_parse(rate_mode, &rate.mode) < 0) ||
       (bitrate && nd_bitrate_kbps_parse(bitrate, &rate.bitrate_kbps) < 0)) {
@@ -114,7 +120,7 @@ int main(int argc, char **argv) {
       listen(listener, 1) < 0)
     die("VR control bind");
   struct nd_encoder encoder;
-  if (nd_encoder_open(&encoder, argv[10], w, h, fps, &rate, AV_PIX_FMT_YUV420P, 0) < 0) {
+  if (nd_encoder_open(&encoder, argv[10], w, h, fps, keyframe_interval, &rate, AV_PIX_FMT_YUV420P, 0) < 0) {
     fprintf(stderr, "VR encoder %s unavailable\n", argv[10]);
     close(listener);
     return 1;
@@ -199,6 +205,9 @@ int main(int argc, char **argv) {
                                ND_ENCRYPTION_REQUIRED, &challenge) < 0)
       goto done;
     uint32_t selected = ntohl(challenge.flags);
+    unsigned effective_interval = (flags & NDC_FLAG_PREDICTED_VIDEO) ? keyframe_interval : 1;
+    if (effective_interval > 1) selected |= NDC_FLAG_PREDICTED_VIDEO;
+    encoder.keyframe_interval = encoder.frames_since_keyframe = effective_interval;
     struct ndc_display display;
     if (ndc_recv_expected(c, NDC_DISPLAY, &display, sizeof(display)) < 0)
       goto done;
@@ -238,7 +247,7 @@ int main(int argc, char **argv) {
     socklen_t sndlen = sizeof(sndbuf);
     if (getsockopt(udp, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sndlen) == 0)
       fprintf(stderr, "VR UDP SO_SNDBUF actual=%d bytes (kernel accounting, not measured latency)\n", sndbuf);
-    tx = nd_video_tx_open(udp, session, stream_key, (unsigned)fps);
+    tx = nd_video_tx_open(udp, session, stream_key, (unsigned)fps, effective_interval > 1);
     if (!tx) goto done;
     uint32_t seq = 0;
     uint64_t last_frames = frames, last_bytes = 0;
@@ -306,7 +315,7 @@ int main(int argc, char **argv) {
       sws_scale(sws, planes, strides, 0, h, frame->data, frame->linesize);
       last_convert_ms = (nd_now_ns() - convert_start) / 1e6;
       frame->pts = frames++;
-      frame->pict_type = AV_PICTURE_TYPE_I;
+      nd_encoder_prepare_frame(&encoder, frame, nd_video_tx_take_keyframe_request(tx));
       uint64_t encode_start = nd_now_ns();
       AVFrame *input = frame;
       if (hw_frame) {

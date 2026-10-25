@@ -111,7 +111,7 @@ bitrate_kbps=20000
 `bitrate_kbps` is the peak encoded-video rate in decimal kbit/s **per stream**
 (20000 = 20 Mbit/s). Capped VBR targets 80% of that peak and requests a VBV
 reservoir of two frame periods. `qp` is ignored in bandwidth mode. Resolution,
-frame rate, all-intra encoding, and latest-frame replacement are preserved.
+frame rate and the bounded low-latency pipeline are preserved.
 QP scales differ by codec/backend; the supported configuration range is 0–51.
 The budget excludes UDP/IP, fragmentation and encryption overhead; frame bursts
 and encoder overshoot can exceed it briefly. This mode does not add packet
@@ -119,14 +119,24 @@ pacing or adapt the budget to network feedback. Restart the server to switch
 modes. A backend that cannot open the requested mode is skipped during probing
 rather than silently using another rate-control mode.
 
+`keyframe_interval=3` is the default: one independent keyframe followed by two
+P-frames (`I P P`). Set it to `1` for all-intra or `2` for `I P`; the supported
+range is 1–60 frames. Longer intervals reduce keyframe overhead but increase
+recovery time after packet loss. At 60 fps, interval 3 provides a recovery
+opportunity every 50 ms; losing that keyframe can extend the wait. There are no
+B-frames or lookahead. Older receivers that do not advertise prediction support
+automatically receive the original all-intra format. Restart the server after
+changing the interval.
+
 The dedicated VR backend supports the same choice without re-pairing:
 
 ```sh
 python3 build-vr/netdisplay-vr/netdisplay-vr tune --rate-control bandwidth --bitrate-kbps 20000
 python3 build-vr/netdisplay-vr/netdisplay-vr tune --rate-control qp --qp 28
+python3 build-vr/netdisplay-vr/netdisplay-vr tune --keyframe-interval 3
 ```
 
-Run either command with SteamVR stopped, then restart the VR backend and SteamVR.
+Run these commands with SteamVR stopped, then restart the VR backend and SteamVR.
 The iOS receiver needs no changes.
 
 With no `display=` entries, the receiver uses every connected display at its
@@ -280,11 +290,19 @@ remain in their platform-specific components.
 
 `src/session.*` implements the native authentication exchange.
 `src/encoder.*` owns hardware encoder selection and low-latency configuration.
-`src/video_tx.*` owns the single-slot transmit worker: newer independent
-frames replace pending frames and a send expires after one frame interval.
+`src/video_tx.*` owns the bounded transmit worker: up to three dependent access
+units preserve decode order, while a newer keyframe supersedes queued work.
+A send expires one frame period after publication, including queue residence.
+Local drops/errors abandon the affected chain and request an early keyframe.
+Receivers also bound pending compressed video to three frames, decode required
+references, and skip broken chains until the next keyframe. Rendering can skip
+decoded images independently. There is no receiver keyframe-request feedback;
+network-loss recovery uses the periodic keyframes.
 `src/frame_transport.*` sends datagrams; `src/frame_receiver.*` validates,
 reassembles, and decrypts them on both Linux and iOS. The iOS native bridge
-only adapts that shared receiver to Swift.
+only adapts that shared receiver to Swift. Negotiated predicted video uses an
+ND02 envelope with keyframe/dependency metadata inside video encryption; legacy
+all-intra video and network probes retain ND01 framing.
 
 `src/control_proto.h` and `src/proto.h` are the wire definitions. After changing
 protocol constants, run `python3 tools/generate-wire.py` to update the checked-in
@@ -292,6 +310,14 @@ Swift constants, then `python3 ios/scripts/generate_project.py` if adding
 sources. Tests check generated constants, mutual authentication and encryption
 policy, transmit cancellation/replacement, and real encoded video passing
 through both receiver interfaces. Wire compatibility stays at v6.
+
+The integrated video tests compare intervals 1, 2 and 3 on a textured background
+with a moving window, inject lost keyframes/P-frames/fragments, and compare
+recovered decoded pixels with an uninterrupted decoder. To exercise an available
+H.264 hardware backend too, run e.g.
+`ND_TEST_ENCODER=h264_nvenc build/tests/netdisplay-stream-test` or substitute
+`h264_vaapi`. These synthetic encoded-byte measurements do not measure screen
+capture, physical network throughput, display latency, or iPhone decoding.
 
 Default ports are UDP 5000 onward for video, UDP 5001 for discovery, and TCP
 5001 for control, authentication, and optional input.
