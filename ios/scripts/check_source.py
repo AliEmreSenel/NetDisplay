@@ -17,6 +17,8 @@ assert '../src/frame_receiver.c' in text
 assert '../src/crypto.c' in text and 'App/Viewer.metal' in text
 assert '"IPHONEOS_DEPLOYMENT_TARGET" = "17.0"' in text, 'Hardware-decoder requirement keys need iOS 17'
 assert 'CODE_SIGNING_ALLOWED' in text
+assert 'PBXAggregateTarget' in text and '"name" = "Prepare libsodium"' in text
+assert 'PBXTargetDependency' in text and 'libsodium-LICENSE.txt' in text
 ET.parse(root/'NetDisplay.xcodeproj'/'xcshareddata'/'xcschemes'/'NetDisplay.xcscheme')
 info=plistlib.loads((root/'App'/'Info.plist').read_bytes())
 assert info['NSLocalNetworkUsageDescription'] and info['NSMotionUsageDescription']

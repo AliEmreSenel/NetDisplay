@@ -437,6 +437,16 @@
 			"isa" = "PBXBuildFile";
 			"fileRef" = "EE9D62778C8B664AA8501AF8";
 		};
+		"917653881840867F57EEC30B" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "text";
+			"path" = "build/sodium/iphoneos-arm64/libsodium-LICENSE.txt";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"33D0B53C08B16CF49187399B" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "917653881840867F57EEC30B";
+		};
 		"A8792157CB4F27FB949C035F" = {
 			"isa" = "PBXFileReference";
 			"explicitFileType" = "wrapper.application";
@@ -498,6 +508,7 @@
 				"2977930C621DFA7756BEB544",
 				"CE49AD5C89D48A9C32E70529",
 				"EE9D62778C8B664AA8501AF8",
+				"917653881840867F57EEC30B",
 				"0A3E27B8CA818264D75C8D81",
 			);
 			"sourceTree" = "<group>";
@@ -560,7 +571,28 @@
 			"files" = (
 				"D3C2358BFDB254816ED9D71E",
 				"B9A73E7D7AC845889F7D3870",
+				"33D0B53C08B16CF49187399B",
 			);
+			"runOnlyForDeploymentPostprocessing" = 0;
+		};
+		"8C4387769CEA917E9E7BA990" = {
+			"isa" = "PBXShellScriptBuildPhase";
+			"buildActionMask" = 2147483647;
+			"files" = (
+			);
+			"name" = "Prepare libsodium";
+			"shellPath" = "/bin/bash";
+			"shellScript" = "exec bash \"$SRCROOT/scripts/prepare-deps.sh\"\n";
+			"inputPaths" = (
+				"$(SRCROOT)/scripts/prepare-deps.sh",
+				"$(SRCROOT)/scripts/verify_minisign.py",
+			);
+			"outputPaths" = (
+				"$(SRCROOT)/build/sodium/iphoneos-arm64/lib/libsodium.a",
+				"$(SRCROOT)/build/sodium/iphoneos-arm64/include/sodium.h",
+				"$(SRCROOT)/build/sodium/iphoneos-arm64/libsodium-LICENSE.txt",
+			);
+			"alwaysOutOfDate" = 1;
 			"runOnlyForDeploymentPostprocessing" = 0;
 		};
 		"2B23A31EEC75B029432F2445" = {
@@ -698,6 +730,56 @@
 			};
 			"name" = "Release";
 		};
+		"F49879B42AC67761E7BBAD88" = {
+			"isa" = "XCBuildConfiguration";
+			"name" = "Debug";
+			"buildSettings" = {
+				"PRODUCT_NAME" = "libsodium";
+				"SKIP_INSTALL" = "YES";
+				"ENABLE_USER_SCRIPT_SANDBOXING" = "NO";
+			};
+		};
+		"3F389F32C6ABE49BE2B9D8A6" = {
+			"isa" = "XCBuildConfiguration";
+			"name" = "Release";
+			"buildSettings" = {
+				"PRODUCT_NAME" = "libsodium";
+				"SKIP_INSTALL" = "YES";
+				"ENABLE_USER_SCRIPT_SANDBOXING" = "NO";
+			};
+		};
+		"7118EFBED6BC6BE3229F56B3" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = (
+				"F49879B42AC67761E7BBAD88",
+				"3F389F32C6ABE49BE2B9D8A6",
+			);
+			"defaultConfigurationIsVisible" = 0;
+			"defaultConfigurationName" = "Release";
+		};
+		"18B4E34805E3472C5575F0FD" = {
+			"isa" = "PBXAggregateTarget";
+			"buildConfigurationList" = "7118EFBED6BC6BE3229F56B3";
+			"buildPhases" = (
+				"8C4387769CEA917E9E7BA990",
+			);
+			"dependencies" = (
+			);
+			"name" = "libsodium";
+			"productName" = "libsodium";
+		};
+		"97353ECD8B96921AD01B9FCE" = {
+			"isa" = "PBXContainerItemProxy";
+			"containerPortal" = "244210E48437B6556980A702";
+			"proxyType" = 1;
+			"remoteGlobalIDString" = "18B4E34805E3472C5575F0FD";
+			"remoteInfo" = "libsodium";
+		};
+		"8782E0FAF29ECE67DFC893A7" = {
+			"isa" = "PBXTargetDependency";
+			"target" = "18B4E34805E3472C5575F0FD";
+			"targetProxy" = "97353ECD8B96921AD01B9FCE";
+		};
 		"B4E10CAA9C5E22150B71559C" = {
 			"isa" = "XCConfigurationList";
 			"buildConfigurations" = (
@@ -727,6 +809,7 @@
 			"buildRules" = (
 			);
 			"dependencies" = (
+				"8782E0FAF29ECE67DFC893A7",
 			);
 			"name" = "NetDisplay";
 			"productName" = "NetDisplay";
@@ -759,6 +842,7 @@
 			"projectRoot" = "";
 			"targets" = (
 				"34A04005BCAF206EEC990BD9",
+				"18B4E34805E3472C5575F0FD",
 			);
 		};
 	};

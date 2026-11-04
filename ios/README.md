@@ -91,11 +91,27 @@ bash ios/scripts/build-ipa.sh
 python3 ios/scripts/validate_ipa.py ios/build/NetDisplay-unsigned.ipa
 ```
 
-On Linux, use `.github/workflows/ios.yml` for the Apple build. Merely having the Swift compiler on Linux is not enough to compile Apple's UIKit/Metal/VideoToolbox frameworks.
+The project uses standard Xcode dependency targets and tools resolved through
+`xcrun`. A compatible build environment must supply the iPhoneOS SDK and its
+compiler/archive tools; a host-only Swift compiler is insufficient. The same
+project and dependency phase are used by every build environment.
 
 The workflow compiles for `generic/platform=iOS`, arm64, with signing disabled. It outputs `ios/build/NetDisplay-unsigned.ipa`. Signing is performed afterward by the user's local sideloading tool/account. No certificates or credentials are embedded in the workflow.
 
-The project references `ios/build/sodium/iphoneos-arm64/lib/libsodium.a`. `prepare-deps.sh` downloads **libsodium 1.0.22**, checks its official Minisign signature with the pinned upstream public key before extracting it, and builds an iPhoneOS static library. Release source and binaries are not vendored in this ZIP. The signed upstream source, network access, and Xcode toolchain are required at build time. Source SHA-256 is recorded as an artifact. Do not disable signature verification to work around a network failure.
+The app depends on the project's `libsodium` aggregate target, which runs
+`prepare-deps.sh` before compiling the app. It downloads **libsodium 1.0.22**,
+checks the pinned SHA-256 and upstream Minisign signature, then builds the
+iPhoneOS arm64 archive and headers at `ios/build/sodium/iphoneos-arm64`.
+No separate dependency preparation command is needed. Minisign is used when
+installed; otherwise the host libsodium library verifies both the file and
+trusted-comment signatures through its Ed25519 API. The upstream public key
+is pinned in the build script, and verification is never skipped.
+
+The verified source and built library are cached. SDK/compiler changes rebuild
+the dependency, and cached archive/header hashes are checked before reuse.
+Concurrent configurations serialize dependency builds. The app includes the
+upstream license as a resource. Source SHA-256 is also recorded as a build
+artifact. The first build needs network access; cached builds use local files.
 
 The app's minimum deployment target is 17.0, but use Xcode 16 or newer for the supplied source/CI settings. No App Store/TestFlight submission workflow is included. Free-account sideloading limitations are documented in the quickstart.
 

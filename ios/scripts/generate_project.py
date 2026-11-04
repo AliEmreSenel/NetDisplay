@@ -40,12 +40,24 @@ for name in ['UIKit','SwiftUI','Foundation','Security','ARKit','AVFoundation','C
     refs.append(file); framework_build.append(add('link:'+name,{'isa':'PBXBuildFile','fileRef':file}))
 sodium=add('sodium',{'isa':'PBXFileReference','lastKnownFileType':'archive.ar','name':'libsodium.a','path':'build/sodium/iphoneos-arm64/lib/libsodium.a','sourceTree':'SOURCE_ROOT'})
 refs.append(sodium); framework_build.append(add('link:sodium',{'isa':'PBXBuildFile','fileRef':sodium}))
+sodium_license=add('sodium-license',{'isa':'PBXFileReference','lastKnownFileType':'text','path':'build/sodium/iphoneos-arm64/libsodium-LICENSE.txt','sourceTree':'SOURCE_ROOT'})
+refs.append(sodium_license); resource_build.append(add('resource:sodium-license',{'isa':'PBXBuildFile','fileRef':sodium_license}))
 product=add('product',{'isa':'PBXFileReference','explicitFileType':'wrapper.application','includeInIndex':0,'path':'NetDisplay.app','sourceTree':'BUILT_PRODUCTS_DIR'})
 product_group=add('products',{'isa':'PBXGroup','children':[product],'name':'Products','sourceTree':'<group>'})
 main_group=add('main-group',{'isa':'PBXGroup','children':refs+[product_group],'sourceTree':'<group>'})
 phases=[]
 for name,kind,files in [('sources','PBXSourcesBuildPhase',source_build),('frameworks','PBXFrameworksBuildPhase',framework_build),('resources','PBXResourcesBuildPhase',resource_build)]:
     phases.append(add(name,{'isa':kind,'buildActionMask':2147483647,'files':files,'runOnlyForDeploymentPostprocessing':0}))
+prepare_sodium=add('prepare-sodium',{
+    'isa':'PBXShellScriptBuildPhase','buildActionMask':2147483647,'files':[],
+    'name':'Prepare libsodium','shellPath':'/bin/bash',
+    'shellScript':'exec bash "$SRCROOT/scripts/prepare-deps.sh"\n',
+    'inputPaths':['$(SRCROOT)/scripts/prepare-deps.sh','$(SRCROOT)/scripts/verify_minisign.py'],
+    'outputPaths':['$(SRCROOT)/build/sodium/iphoneos-arm64/lib/libsodium.a',
+                   '$(SRCROOT)/build/sodium/iphoneos-arm64/include/sodium.h',
+                   '$(SRCROOT)/build/sodium/iphoneos-arm64/libsodium-LICENSE.txt'],
+    'alwaysOutOfDate':1,'runOnlyForDeploymentPostprocessing':0,
+})
 project_configs=[]; target_configs=[]
 for config in ['Debug','Release']:
     project_settings={
@@ -78,10 +90,24 @@ for config in ['Debug','Release']:
         'SWIFT_EMIT_LOC_STRINGS':'NO','ENABLE_BITCODE':'NO',
     }
     target_configs.append(add('target:'+config,{'isa':'XCBuildConfiguration','buildSettings':target_settings,'name':config}))
+sodium_configs=[]
+for config in ['Debug','Release']:
+    sodium_configs.append(add('sodium:'+config,{'isa':'XCBuildConfiguration','name':config,'buildSettings':{
+        'PRODUCT_NAME':'libsodium','SKIP_INSTALL':'YES',
+        # Bootstrap needs network access and writes the configured install tree.
+        # Only this dependency target disables the script sandbox.
+        'ENABLE_USER_SCRIPT_SANDBOXING':'NO',
+    }}))
+sodium_list=add('sodium-configs',{'isa':'XCConfigurationList','buildConfigurations':sodium_configs,'defaultConfigurationIsVisible':0,'defaultConfigurationName':'Release'})
+sodium_target=add('sodium-target',{'isa':'PBXAggregateTarget','buildConfigurationList':sodium_list,'buildPhases':[prepare_sodium],
+    'dependencies':[],'name':'libsodium','productName':'libsodium'})
+sodium_proxy=add('sodium-proxy',{'isa':'PBXContainerItemProxy','containerPortal':ident('project'),'proxyType':1,
+    'remoteGlobalIDString':sodium_target,'remoteInfo':'libsodium'})
+sodium_dependency=add('sodium-dependency',{'isa':'PBXTargetDependency','target':sodium_target,'targetProxy':sodium_proxy})
 project_list=add('project-configs',{'isa':'XCConfigurationList','buildConfigurations':project_configs,'defaultConfigurationIsVisible':0,'defaultConfigurationName':'Release'})
 target_list=add('target-configs',{'isa':'XCConfigurationList','buildConfigurations':target_configs,'defaultConfigurationIsVisible':0,'defaultConfigurationName':'Release'})
-target=add('target',{'isa':'PBXNativeTarget','buildConfigurationList':target_list,'buildPhases':phases,'buildRules':[],'dependencies':[],'name':'NetDisplay','productName':'NetDisplay','productReference':product,'productType':'com.apple.product-type.application'})
-project=add('project',{'isa':'PBXProject','attributes':{'LastUpgradeCheck':'1600','LastSwiftUpdateCheck':'1600','BuildIndependentTargetsInParallel':'YES','TargetAttributes':{target:{'CreatedOnToolsVersion':'16.0'}}},'buildConfigurationList':project_list,'compatibilityVersion':'Xcode 14.0','developmentRegion':'en','hasScannedForEncodings':0,'knownRegions':['en','Base'],'mainGroup':main_group,'productRefGroup':product_group,'projectDirPath':'','projectRoot':'','targets':[target]})
+target=add('target',{'isa':'PBXNativeTarget','buildConfigurationList':target_list,'buildPhases':phases,'buildRules':[],'dependencies':[sodium_dependency],'name':'NetDisplay','productName':'NetDisplay','productReference':product,'productType':'com.apple.product-type.application'})
+project=add('project',{'isa':'PBXProject','attributes':{'LastUpgradeCheck':'1600','LastSwiftUpdateCheck':'1600','BuildIndependentTargetsInParallel':'YES','TargetAttributes':{target:{'CreatedOnToolsVersion':'16.0'}}},'buildConfigurationList':project_list,'compatibilityVersion':'Xcode 14.0','developmentRegion':'en','hasScannedForEncodings':0,'knownRegions':['en','Base'],'mainGroup':main_group,'productRefGroup':product_group,'projectDirPath':'','projectRoot':'','targets':[target,sodium_target]})
 pbx={'archiveVersion':1,'classes':{},'objectVersion':56,'objects':objects,'rootObject':project}
 project_dir=ROOT/'NetDisplay.xcodeproj'; project_dir.mkdir(exist_ok=True)
 (project_dir/'project.pbxproj').write_text('// !$*UTF8*$!\n'+emit(pbx)+'\n')

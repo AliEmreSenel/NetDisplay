@@ -6,6 +6,7 @@ OUT="$ROOT/ios/build/tests"
 mkdir -p "$OUT"
 python3 "$ROOT/tools/generate-wire.py" --check
 exec > >(tee "$OUT/test.log") 2>&1
+python3 -m unittest discover -s "$ROOT/ios/Tests" -p test_dependencies.py
 command -v swiftc >/dev/null || { echo 'Swift compiler is required (included on the macOS CI runner).' >&2; exit 1; }
 if [ -z "${SODIUM_TEST_CFLAGS:-}" ]; then
   command -v pkg-config >/dev/null || { echo 'Install pkg-config and libsodium development headers.' >&2; exit 1; }
