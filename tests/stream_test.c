@@ -59,7 +59,11 @@ static uint64_t run(const char *name, unsigned interval, int encrypted, int band
   const uint8_t *stream_key = encrypted ? key : NULL;
   struct nd_video_tx *tx = nd_video_tx_open(fd[0], session, stream_key, FPS, interval > 1);
   NDIOSAssembler *ios = nd_ios_assembler_create(session, stream_key);
-  struct nd_assembly assembly = {.expected_session = session};
+  uint8_t *extra = calloc(1, ND_MAX_WIRE_FRAME + AV_INPUT_BUFFER_PADDING_SIZE);
+  CHECK(extra);
+  struct nd_reorder reorder;
+  nd_reorder_init(&reorder, session, buffer, extra);
+  struct nd_reorder_slot *output = NULL;
   struct nd_rx_stats stats = {0};
   struct nd_decode_chain linux_chain = {0}, ios_chain = {0};
   AVCodecContext *reference = decoder(encoder.context->codec_id), *lossy = decoder(encoder.context->codec_id);
@@ -108,24 +112,30 @@ static uint64_t run(const char *name, unsigned interval, int encrypted, int band
       ssize_t n = recv(fd[1], datagram, sizeof(datagram), 0);
       CHECK(n > 0);
       if (seq == 1 || seq == 2 * interval || (seq == 4 * interval + 1 && frag == 0)) continue;
-      complete = nd_frame_receive(&assembly, &stats, buffer, datagram, (size_t)n, stream_key);
+      nd_reorder_feed(&reorder, &stats, datagram, (size_t)n, stream_key, nd_now_ns());
+      output = nd_reorder_take(&reorder);
+      complete = output != NULL;
       CHECK(nd_ios_assembler_feed(ios, datagram, (size_t)n) == complete);
     }
+    if (interval > 1 && seq == 2 * interval + 1) CHECK(!complete);
+    if (seq == 3 * interval) CHECK(complete);
     if (complete) {
+      struct nd_assembly assembly = output->assembly;
+      uint8_t *frame_bytes = output->buffer;
       NDIOSStats received = nd_ios_assembler_stats(ios);
       CHECK(received.sequence == seq && received.frame_bytes == assembly.size);
       CHECK(received.reference == assembly.reference && received.keyframe == (unsigned)assembly.keyframe);
-      CHECK(!memcmp(buffer + assembly.offset, nd_ios_assembler_bytes(ios), assembly.size));
+      CHECK(!memcmp(frame_bytes + assembly.offset, nd_ios_assembler_bytes(ios), assembly.size));
       int accepted = nd_decode_chain_accept(&linux_chain, seq, assembly.reference, assembly.keyframe);
       CHECK(nd_decode_chain_accept(&ios_chain, seq, received.reference, received.keyframe) == accepted);
       if (accepted) {
-        memset(buffer + assembly.offset + assembly.size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
-        CHECK(decode(lossy, buffer + assembly.offset, assembly.size) == expected);
+        memset(frame_bytes + assembly.offset + assembly.size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+        CHECK(decode(lossy, frame_bytes + assembly.offset, assembly.size) == expected);
         decoded++;
       } else rejected++;
-      if (interval > 1 && seq == 2 * interval + 1) CHECK(!accepted);
       if (seq == 3 * interval) CHECK(accepted);
     }
+    if (!complete && seq != 1 && seq != 2 * interval && seq != 4 * interval + 1) rejected++;
     CHECK(avcodec_receive_packet(encoder.context, encoded) == AVERROR(EAGAIN));
   }
   CHECK(decoded > FRAMES / 2);
@@ -135,7 +145,7 @@ static uint64_t run(const char *name, unsigned interval, int encrypted, int band
   close(fd[0]); close(fd[1]);
   avcodec_free_context(&reference); avcodec_free_context(&lossy);
   av_packet_free(&encoded); av_frame_free(&frame); av_frame_free(&hw);
-  nd_encoder_close(&encoder); free(buffer);
+  nd_encoder_close(&encoder); free(buffer); free(extra);
   return bytes;
 }
 int main(int argc, char **argv) {

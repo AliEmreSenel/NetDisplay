@@ -50,16 +50,18 @@ final class UDPReceiver {
                 // Sender uses an ephemeral source port; filter IP + session, not port.
                 guard addr.sin_family == sa_family_t(AF_INET), addr.sin_addr.s_addr == remote else { continue }
                 let result = packet.withUnsafeBufferPointer { nd_ios_assembler_feed(assembly, $0.baseAddress, n) }
-                if result == 1 {
+                var ready = result
+                while ready == 1 {
                     let s = nd_ios_assembler_stats(assembly)
-                    guard let bytes = nd_ios_assembler_bytes(assembly) else { continue }
+                    guard let bytes = nd_ios_assembler_bytes(assembly) else { break }
                     self.onFrame(EncodedFrame(bytes: Data(bytes: bytes, count: Int(s.frame_bytes)),
                         sequence: s.sequence, reference: s.reference, keyframe: s.keyframe != 0,
                         firstNS: s.first_ns, completeNS: s.complete_ns))
                     self.diagnostics.update {
                         $0.assemblyMS = Double(s.complete_ns - s.first_ns) / 1e6
-                        $0.lastVideoNS = s.complete_ns
+                        $0.lastVideoNS = max($0.lastVideoNS, s.complete_ns)
                     }
+                    ready = nd_ios_assembler_next(assembly)
                 }
             }
             let now = nd_ios_now_ns()
