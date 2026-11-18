@@ -115,7 +115,7 @@ obsolete:
   return 0;
 bad:
   atomic_fetch_add(&st->bad, 1);
-  return -1;
+  return 0;
 }
 
 int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
@@ -127,7 +127,7 @@ int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
     return 0;
   }
   const uint8_t *payload = (const uint8_t *)packet + sizeof(struct nd_hdr);
-  return assemble_fragment(a, st, buffer, &f, payload, key) == 1;
+  return assemble_fragment(a, st, buffer, &f, payload, key);
 }
 
 void nd_reorder_init(struct nd_reorder *r, uint64_t session, uint8_t *a, uint8_t *b) {
@@ -137,98 +137,136 @@ void nd_reorder_init(struct nd_reorder *r, uint64_t session, uint8_t *a, uint8_t
   r->slots[1].buffer = b;
 }
 
-static void reorder_drop(struct nd_reorder_slot *s, struct nd_rx_stats *st) {
-  if (s->used && s->assembly.active) atomic_fetch_add(&st->partial_drop, 1);
-  s->used = s->complete = 0;
+static int slot_pending(const struct nd_reorder_slot *slot) {
+  return slot->assembly.active || slot->ready;
 }
 
-void nd_reorder_feed(struct nd_reorder *r, struct nd_rx_stats *st,
-                     const void *packet, size_t n, const uint8_t *key, uint64_t now) {
-  struct frame_fragment f;
-  /* Validate the envelope before it can evict either slot. */
-  if (!parse_fragment(&f, packet, n, key != NULL)) {
-    atomic_fetch_add(&st->bad, 1);
-    return;
-  }
-  uint64_t session = f.session;
-  uint32_t seq = f.seq, magic = f.magic;
-  if ((r->expected_session && session != r->expected_session) ||
-      session == r->previous_session) {
-    atomic_fetch_add(&st->obsolete, 1);
-    return;
-  }
-  if (!r->slots[0].used) {
-    r->deadline_ns = 0;
-    if (r->slots[1].used) {
-      struct nd_reorder_slot tmp = r->slots[0];
-      r->slots[0] = r->slots[1];
-      r->slots[1] = tmp;
-    }
-  }
-  struct nd_reorder_slot *old = &r->slots[0], *newer = &r->slots[1], *s = NULL;
-  if (r->deadline_ns && now >= r->deadline_ns) {
-    reorder_drop(old, st);
-    r->deadline_ns = 0;
-    r->last_valid = 0;
-  }
-  if (old->used && old->assembly.session == session && old->assembly.seq == seq) s = old;
-  else if (newer->used && newer->assembly.session == session && newer->assembly.seq == seq) s = newer;
-  else {
-    struct nd_reorder_slot *latest = newer->used ? newer : old->used ? old : NULL;
-    if (latest && (latest->assembly.session != session || (int32_t)(seq - latest->assembly.seq) > 0)) {
-      if (magic == ND_VIDEO_MAGIC && latest == old && old->assembly.magic == ND_VIDEO_MAGIC &&
-          old->assembly.active && seq == old->assembly.seq + 1u && old->assembly.session == session) {
-        s = newer;
-        r->deadline_ns = now + ND_REORDER_BUDGET_NS;
-      } else {
-        reorder_drop(old, st); reorder_drop(newer, st);
-        r->deadline_ns = 0;
-        if (magic == ND_VIDEO_MAGIC) r->last_valid = 0;
-        s = old;
-      }
-    } else if (!latest) {
-      if (r->newest_valid && session == r->newest_session &&
-          (int32_t)(seq - r->newest_seq) <= 0) { atomic_fetch_add(&st->obsolete, 1); return; }
-      s = old;
-    } else { atomic_fetch_add(&st->obsolete, 1); return; }
-    if (r->newest_valid && session != r->newest_session) {
-      r->previous_session = r->newest_session;
-      r->last_valid = 0;
-    }
-    r->newest_seq = seq; r->newest_session = session; r->newest_valid = 1;
-    uint8_t *buf = s->buffer;
-    memset(s, 0, sizeof(*s));
-    s->buffer = buf;
-    s->assembly.expected_session = r->expected_session;
-    s->used = 1;
-  }
-  if (s->complete) { atomic_fetch_add(&st->dup, 1); return; }
-  const uint8_t *payload = (const uint8_t *)packet + sizeof(struct nd_hdr);
-  int result = assemble_fragment(&s->assembly, st, s->buffer, &f, payload, key);
-  if (result == 1) {
-    s->complete = 1;
-    if (s == newer && s->assembly.keyframe) {
-      reorder_drop(old, st);
-      r->deadline_ns = 0;
-    }
-  } else if (result < 0 && !s->assembly.active) {
-    /* A damaged successor cannot invalidate the predecessor's reference. */
-    reorder_drop(s, st);
-  }
+static void discard_frame(struct nd_reorder_slot *slot, struct nd_rx_stats *stats) {
+  if (slot->assembly.active) atomic_fetch_add(&stats->partial_drop, 1);
+  slot->assembly.active = 0;
+  slot->ready = 0;
 }
 
-struct nd_reorder_slot *nd_reorder_take(struct nd_reorder *r) {
-  struct nd_reorder_slot *old = &r->slots[0], *newer = &r->slots[1];
-  struct nd_reorder_slot *s = old->used ? old : newer->used ? newer : NULL;
-  if (!s || !s->complete) return NULL;
-  if (!s->assembly.keyframe && (!r->last_valid || s->assembly.reference != r->last_seq)) {
-    s->used = s->complete = 0;
-    r->last_valid = 0;
+static int slot_matches(const struct nd_reorder_slot *slot,
+                        const struct frame_fragment *fragment) {
+  return slot_pending(slot) && slot->assembly.session == fragment->session &&
+         slot->assembly.seq == fragment->seq;
+}
+
+static int can_keep_predecessor(const struct nd_reorder_slot *older,
+                                const struct frame_fragment *fragment) {
+  const struct nd_assembly *frame = &older->assembly;
+  return frame->active && frame->magic == ND_VIDEO_MAGIC &&
+         fragment->magic == ND_VIDEO_MAGIC && fragment->session == frame->session &&
+         fragment->seq == frame->seq + 1u;
+}
+
+static struct nd_reorder_slot *select_slot(struct nd_reorder *reorder,
+                                           struct nd_rx_stats *stats,
+                                           struct nd_reorder_slot *older,
+                                           struct nd_reorder_slot *newer,
+                                           const struct frame_fragment *fragment,
+                                           uint64_t now_ns) {
+  if (slot_matches(older, fragment))
+    return older;
+  if (slot_matches(newer, fragment))
+    return newer;
+
+  struct nd_reorder_slot *latest = NULL;
+  if (slot_pending(newer))
+    latest = newer;
+  else if (slot_pending(older))
+    latest = older;
+
+  /* With empty slots, the last seen sequence still rejects delayed packets. */
+  uint64_t latest_session = latest ? latest->assembly.session : reorder->newest_session;
+  uint32_t latest_seq = latest ? latest->assembly.seq : reorder->newest_seq;
+  if (fragment->session == latest_session && (int32_t)(fragment->seq - latest_seq) <= 0)
     return NULL;
+
+  struct nd_reorder_slot *slot;
+  if (latest == older && can_keep_predecessor(older, fragment)) {
+    reorder->predecessor_deadline_ns = now_ns + ND_REORDER_BUDGET_NS;
+    slot = newer;
+  } else {
+    discard_frame(older, stats);
+    discard_frame(newer, stats);
+    reorder->predecessor_deadline_ns = 0;
+    if (latest && fragment->magic == ND_VIDEO_MAGIC)
+      reorder->released.valid = 0;
+    slot = older;
   }
-  r->last_seq = s->assembly.seq;
-  r->last_valid = 1;
-  s->used = s->complete = 0;
-  if (s == old) r->deadline_ns = 0;
-  return s;
+
+  if (reorder->newest_session && fragment->session != reorder->newest_session) {
+    reorder->previous_session = reorder->newest_session;
+    reorder->released.valid = 0;
+  }
+  reorder->newest_session = fragment->session;
+  reorder->newest_seq = fragment->seq;
+  slot->assembly = (struct nd_assembly){.expected_session = reorder->expected_session};
+  return slot;
+}
+
+void nd_reorder_feed(struct nd_reorder *reorder, struct nd_rx_stats *stats,
+                     const void *packet, size_t length, const uint8_t *key,
+                     uint64_t now_ns) {
+  struct frame_fragment fragment;
+  if (!parse_fragment(&fragment, packet, length, key != NULL)) {
+    atomic_fetch_add(&stats->bad, 1);
+    return;
+  }
+  if ((reorder->expected_session && fragment.session != reorder->expected_session) ||
+      fragment.session == reorder->previous_session) {
+    atomic_fetch_add(&stats->obsolete, 1);
+    return;
+  }
+
+  struct nd_reorder_slot *older = &reorder->slots[reorder->oldest_slot];
+  struct nd_reorder_slot *newer = &reorder->slots[1u - reorder->oldest_slot];
+  /* Promote the newer slot by swapping roles, keeping its buffer in place. */
+  if (!slot_pending(older)) {
+    reorder->predecessor_deadline_ns = 0;
+    if (slot_pending(newer)) {
+      reorder->oldest_slot = 1u - reorder->oldest_slot;
+      struct nd_reorder_slot *empty = older;
+      older = newer;
+      newer = empty;
+    }
+  }
+  if (reorder->predecessor_deadline_ns && now_ns >= reorder->predecessor_deadline_ns) {
+    discard_frame(older, stats);
+    reorder->predecessor_deadline_ns = 0;
+    reorder->released.valid = 0;
+  }
+
+  struct nd_reorder_slot *slot = select_slot(reorder, stats, older, newer, &fragment, now_ns);
+  if (!slot) {
+    atomic_fetch_add(&stats->obsolete, 1);
+    return;
+  }
+  if (slot->ready) {
+    atomic_fetch_add(&stats->dup, 1);
+    return;
+  }
+
+  const uint8_t *payload = (const uint8_t *)packet + sizeof(struct nd_hdr);
+  slot->ready = assemble_fragment(&slot->assembly, stats, slot->buffer, &fragment, payload, key);
+  if (slot == newer && slot->ready && slot->assembly.keyframe) {
+    discard_frame(older, stats);
+    reorder->predecessor_deadline_ns = 0;
+  }
+}
+
+struct nd_reorder_slot *nd_reorder_take(struct nd_reorder *reorder) {
+  struct nd_reorder_slot *older = &reorder->slots[reorder->oldest_slot];
+  struct nd_reorder_slot *slot = slot_pending(older)
+      ? older : &reorder->slots[1u - reorder->oldest_slot];
+  if (!slot->ready) return NULL;
+
+  slot->ready = 0;
+  if (slot == older) reorder->predecessor_deadline_ns = 0;
+  const struct nd_assembly *frame = &slot->assembly;
+  if (!nd_decode_chain_accept(&reorder->released, frame->seq, frame->reference, frame->keyframe))
+    return NULL;
+  return slot;
 }

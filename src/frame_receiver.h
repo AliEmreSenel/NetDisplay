@@ -35,12 +35,20 @@ int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *stats,
 /* Two video slots, supplied and owned by the caller. Drain after each feed;
  * a returned slot's buffer may be swapped before the next call. */
 #define ND_REORDER_BUDGET_NS 4000000ull
-struct nd_reorder_slot { struct nd_assembly assembly; uint8_t *buffer; int used, complete; };
+struct nd_reorder_slot {
+  struct nd_assembly assembly;
+  uint8_t *buffer;
+  int ready;
+};
+
 struct nd_reorder {
   struct nd_reorder_slot slots[2];
-  uint64_t expected_session, deadline_ns, newest_session, previous_session;
-  uint32_t last_seq, newest_seq;
-  int last_valid, newest_valid;
+  unsigned oldest_slot;
+  uint64_t predecessor_deadline_ns;
+  uint64_t expected_session, previous_session;
+  uint64_t newest_session;
+  uint32_t newest_seq;
+  struct nd_decode_chain released;
 };
 void nd_reorder_init(struct nd_reorder *, uint64_t session, uint8_t *, uint8_t *);
 void nd_reorder_feed(struct nd_reorder *, struct nd_rx_stats *, const void *, size_t,
