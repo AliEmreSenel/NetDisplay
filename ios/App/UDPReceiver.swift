@@ -53,13 +53,13 @@ final class UDPReceiver {
                 var ready = result
                 while ready == 1 {
                     let s = nd_ios_assembler_stats(assembly)
-                    guard let bytes = nd_ios_assembler_bytes(assembly) else { continue }
+                    guard let bytes = nd_ios_assembler_bytes(assembly) else { break }
                     self.onFrame(EncodedFrame(bytes: Data(bytes: bytes, count: Int(s.frame_bytes)),
                         sequence: s.sequence, reference: s.reference, keyframe: s.keyframe != 0,
                         firstNS: s.first_ns, completeNS: s.complete_ns))
                     self.diagnostics.update {
                         $0.assemblyMS = Double(s.complete_ns - s.first_ns) / 1e6
-                        $0.lastVideoNS = s.complete_ns
+                        $0.lastVideoNS = max($0.lastVideoNS, s.complete_ns)
                     }
                     ready = nd_ios_assembler_next(assembly)
                 }

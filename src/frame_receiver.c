@@ -21,25 +21,44 @@ int nd_decode_chain_accept(struct nd_decode_chain *chain, uint32_t seq,
   return 1;
 }
 
-int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
-                     uint8_t *buffer, const void *packet, size_t n,
-                     const uint8_t *key) {
+struct frame_fragment {
+  uint64_t session;
+  uint32_t seq, size, magic;
+  uint16_t frag, count;
+  size_t offset, length, max_plain;
+};
+
+static int parse_fragment(struct frame_fragment *f, const void *packet,
+                          size_t n, int encrypted) {
   struct nd_hdr h;
-  if (n < sizeof(h) || n > ND_UDP_PAYLOAD_MAX) goto bad;
+  if (n < sizeof(h) || n > ND_UDP_PAYLOAD_MAX) return 0;
   memcpy(&h, packet, sizeof(h));
-  uint64_t session = nd_ntoh64(h.session);
-  uint32_t seq = ntohl(h.seq), size = ntohl(h.frame_size), magic = ntohl(h.magic);
-  uint16_t frag = ntohs(h.frag), count = ntohs(h.frag_count);
-  size_t max_plain = ND_MAX_FRAME + (magic == ND_VIDEO_MAGIC ? sizeof(struct nd_video_meta) : 0);
-  if ((magic != ND_MAGIC && magic != ND_VIDEO_MAGIC) || !session || !size ||
-      size > max_plain + (key ? 16u : 0u) || !count ||
-      count != (size + ND_FRAG_DATA - 1) / ND_FRAG_DATA || frag >= count)
-    goto bad;
+  f->session = nd_ntoh64(h.session);
+  f->seq = ntohl(h.seq);
+  f->size = ntohl(h.frame_size);
+  f->magic = ntohl(h.magic);
+  f->frag = ntohs(h.frag);
+  f->count = ntohs(h.frag_count);
+  f->max_plain = ND_MAX_FRAME;
+  if (f->magic == ND_VIDEO_MAGIC) f->max_plain += sizeof(struct nd_video_meta);
+  if ((f->magic != ND_MAGIC && f->magic != ND_VIDEO_MAGIC) || !f->session ||
+      !f->size || f->size > f->max_plain + (encrypted ? 16u : 0u) ||
+      !f->count || f->count != (f->size + ND_FRAG_DATA - 1) / ND_FRAG_DATA ||
+      f->frag >= f->count)
+    return 0;
+  f->offset = (size_t)f->frag * ND_FRAG_DATA;
+  f->length = f->size - f->offset;
+  if (f->length > ND_FRAG_DATA) f->length = ND_FRAG_DATA;
+  return n == sizeof(h) + f->length;
+}
+
+static int assemble_fragment(struct nd_assembly *a, struct nd_rx_stats *st,
+                             uint8_t *buffer, const struct frame_fragment *f,
+                             const uint8_t *payload, const uint8_t *key) {
+  uint64_t session = f->session;
+  uint32_t seq = f->seq, size = f->size, magic = f->magic;
+  uint16_t frag = f->frag, count = f->count;
   if (a->expected_session && session != a->expected_session) goto obsolete;
-  size_t off = (size_t)frag * ND_FRAG_DATA;
-  size_t want = size - off;
-  if (want > ND_FRAG_DATA) want = ND_FRAG_DATA;
-  if (n != sizeof(h) + want) goto bad;
   if (session == a->previous_session) goto obsolete;
   if (session != a->session || (int32_t)(seq - a->seq) > 0) {
     if (a->active) atomic_fetch_add(&st->partial_drop, 1);
@@ -61,7 +80,7 @@ int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
     atomic_fetch_add(&st->dup, 1);
     return 0;
   }
-  memcpy(buffer + off, (const uint8_t *)packet + sizeof(h), want);
+  memcpy(buffer + f->offset, payload, f->length);
   a->got[frag >> 6] |= mask;
   if (++a->count != a->fragments) return 0;
   a->active = 0;
@@ -69,7 +88,7 @@ int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
   if (key) {
     size_t plain;
     if (nd_crypto_decrypt(buffer, &plain, buffer, a->size, key, session, seq) < 0 ||
-        !plain || plain > max_plain) goto bad;
+        !plain || plain > f->max_plain) goto bad;
     a->size = (uint32_t)plain;
   }
   a->offset = 0;
@@ -96,7 +115,19 @@ obsolete:
   return 0;
 bad:
   atomic_fetch_add(&st->bad, 1);
-  return 0;
+  return -1;
+}
+
+int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *st,
+                     uint8_t *buffer, const void *packet, size_t n,
+                     const uint8_t *key) {
+  struct frame_fragment f;
+  if (!parse_fragment(&f, packet, n, key != NULL)) {
+    atomic_fetch_add(&st->bad, 1);
+    return 0;
+  }
+  const uint8_t *payload = (const uint8_t *)packet + sizeof(struct nd_hdr);
+  return assemble_fragment(a, st, buffer, &f, payload, key) == 1;
 }
 
 void nd_reorder_init(struct nd_reorder *r, uint64_t session, uint8_t *a, uint8_t *b) {
@@ -107,35 +138,37 @@ void nd_reorder_init(struct nd_reorder *r, uint64_t session, uint8_t *a, uint8_t
 }
 
 static void reorder_drop(struct nd_reorder_slot *s, struct nd_rx_stats *st) {
-  if (s->used && !s->complete) atomic_fetch_add(&st->partial_drop, 1);
+  if (s->used && s->assembly.active) atomic_fetch_add(&st->partial_drop, 1);
   s->used = s->complete = 0;
 }
 
 void nd_reorder_feed(struct nd_reorder *r, struct nd_rx_stats *st,
                      const void *packet, size_t n, const uint8_t *key, uint64_t now) {
-  struct nd_hdr h;
+  struct frame_fragment f;
   /* Validate the envelope before it can evict either slot. */
-  if (n < sizeof(h) || n > ND_UDP_PAYLOAD_MAX) { atomic_fetch_add(&st->bad, 1); return; }
-  memcpy(&h, packet, sizeof(h));
-  uint32_t magic = ntohl(h.magic), seq = ntohl(h.seq), size = ntohl(h.frame_size);
-  uint64_t session = nd_ntoh64(h.session);
-  uint16_t frag = ntohs(h.frag), count = ntohs(h.frag_count);
-  size_t max = ND_MAX_FRAME + (magic == ND_VIDEO_MAGIC ? sizeof(struct nd_video_meta) : 0) + (key ? 16u : 0u);
-  if ((magic != ND_MAGIC && magic != ND_VIDEO_MAGIC) || !session || !size || size > max ||
-      !count || count != (size + ND_FRAG_DATA - 1) / ND_FRAG_DATA || frag >= count ||
-      n != sizeof(h) + ((size - (size_t)frag * ND_FRAG_DATA > ND_FRAG_DATA) ?
-                        ND_FRAG_DATA : size - (size_t)frag * ND_FRAG_DATA)) {
-    atomic_fetch_add(&st->bad, 1); return;
+  if (!parse_fragment(&f, packet, n, key != NULL)) {
+    atomic_fetch_add(&st->bad, 1);
+    return;
   }
-  if (r->expected_session && session != r->expected_session) { atomic_fetch_add(&st->obsolete, 1); return; }
-  if (!r->slots[0].used && r->slots[1].used) {
-    struct nd_reorder_slot tmp = r->slots[0];
-    r->slots[0] = r->slots[1]; r->slots[1] = tmp;
+  uint64_t session = f.session;
+  uint32_t seq = f.seq, magic = f.magic;
+  if ((r->expected_session && session != r->expected_session) ||
+      session == r->previous_session) {
+    atomic_fetch_add(&st->obsolete, 1);
+    return;
+  }
+  if (!r->slots[0].used) {
+    r->deadline_ns = 0;
+    if (r->slots[1].used) {
+      struct nd_reorder_slot tmp = r->slots[0];
+      r->slots[0] = r->slots[1];
+      r->slots[1] = tmp;
+    }
   }
   struct nd_reorder_slot *old = &r->slots[0], *newer = &r->slots[1], *s = NULL;
-  if (r->overtaken_ns && now - r->overtaken_ns >= ND_REORDER_BUDGET_NS) {
+  if (r->deadline_ns && now >= r->deadline_ns) {
     reorder_drop(old, st);
-    r->overtaken_ns = 0;
+    r->deadline_ns = 0;
     r->last_valid = 0;
   }
   if (old->used && old->assembly.session == session && old->assembly.seq == seq) s = old;
@@ -146,19 +179,22 @@ void nd_reorder_feed(struct nd_reorder *r, struct nd_rx_stats *st,
       if (magic == ND_VIDEO_MAGIC && latest == old && old->assembly.magic == ND_VIDEO_MAGIC &&
           old->assembly.active && seq == old->assembly.seq + 1u && old->assembly.session == session) {
         s = newer;
-        r->overtaken_ns = now ? now : 1;
+        r->deadline_ns = now + ND_REORDER_BUDGET_NS;
       } else {
         reorder_drop(old, st); reorder_drop(newer, st);
-        r->overtaken_ns = 0;
+        r->deadline_ns = 0;
         if (magic == ND_VIDEO_MAGIC) r->last_valid = 0;
         s = old;
       }
     } else if (!latest) {
       if (r->newest_valid && session == r->newest_session &&
           (int32_t)(seq - r->newest_seq) <= 0) { atomic_fetch_add(&st->obsolete, 1); return; }
-      if (r->newest_valid && session != r->newest_session) r->last_valid = 0;
       s = old;
     } else { atomic_fetch_add(&st->obsolete, 1); return; }
+    if (r->newest_valid && session != r->newest_session) {
+      r->previous_session = r->newest_session;
+      r->last_valid = 0;
+    }
     r->newest_seq = seq; r->newest_session = session; r->newest_valid = 1;
     uint8_t *buf = s->buffer;
     memset(s, 0, sizeof(*s));
@@ -167,16 +203,17 @@ void nd_reorder_feed(struct nd_reorder *r, struct nd_rx_stats *st,
     s->used = 1;
   }
   if (s->complete) { atomic_fetch_add(&st->dup, 1); return; }
-  unsigned long long bad = atomic_load(&st->bad);
-  if (nd_frame_receive(&s->assembly, st, s->buffer, packet, n, key)) {
+  const uint8_t *payload = (const uint8_t *)packet + sizeof(struct nd_hdr);
+  int result = assemble_fragment(&s->assembly, st, s->buffer, &f, payload, key);
+  if (result == 1) {
     s->complete = 1;
     if (s == newer && s->assembly.keyframe) {
       reorder_drop(old, st);
-      r->overtaken_ns = 0;
+      r->deadline_ns = 0;
     }
-  } else if (atomic_load(&st->bad) != bad && !s->assembly.active) {
+  } else if (result < 0 && !s->assembly.active) {
+    /* A damaged successor cannot invalidate the predecessor's reference. */
     reorder_drop(s, st);
-    r->last_valid = 0;
   }
 }
 
@@ -192,6 +229,6 @@ struct nd_reorder_slot *nd_reorder_take(struct nd_reorder *r) {
   r->last_seq = s->assembly.seq;
   r->last_valid = 1;
   s->used = s->complete = 0;
-  if (s == old) r->overtaken_ns = 0;
+  if (s == old) r->deadline_ns = 0;
   return s;
 }

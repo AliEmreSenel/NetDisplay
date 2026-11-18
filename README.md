@@ -312,8 +312,10 @@ A send expires one frame period after publication, including queue residence.
 Local drops/errors abandon the affected chain and request an early keyframe.
 Receivers also bound pending compressed video to three frames, decode required
 references, and skip broken chains until the next keyframe. Rendering can skip
-decoded images independently. There is no receiver keyframe-request feedback;
-network-loss recovery uses the periodic keyframes.
+decoded images independently. During predicted video, the receiver can keep
+one incomplete predecessor for up to 4 ms after the next frame starts arriving.
+It releases decodable frames immediately, and a complete newer keyframe
+supersedes the older chain. Network-loss recovery uses the periodic keyframes.
 `src/frame_transport.*` sends datagrams; `src/frame_receiver.*` validates,
 reassembles, and decrypts them on both Linux and iOS. The iOS native bridge
 only adapts that shared receiver to Swift. Negotiated predicted video uses an

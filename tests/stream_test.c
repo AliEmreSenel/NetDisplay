@@ -117,6 +117,8 @@ static uint64_t run(const char *name, unsigned interval, int encrypted, int band
       complete = output != NULL;
       CHECK(nd_ios_assembler_feed(ios, datagram, (size_t)n) == complete);
     }
+    if (interval > 1 && seq == 2 * interval + 1) CHECK(!complete);
+    if (seq == 3 * interval) CHECK(complete);
     if (complete) {
       struct nd_assembly assembly = output->assembly;
       uint8_t *frame_bytes = output->buffer;

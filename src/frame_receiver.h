@@ -38,7 +38,7 @@ int nd_frame_receive(struct nd_assembly *a, struct nd_rx_stats *stats,
 struct nd_reorder_slot { struct nd_assembly assembly; uint8_t *buffer; int used, complete; };
 struct nd_reorder {
   struct nd_reorder_slot slots[2];
-  uint64_t expected_session, overtaken_ns, newest_session;
+  uint64_t expected_session, deadline_ns, newest_session, previous_session;
   uint32_t last_seq, newest_seq;
   int last_valid, newest_valid;
 };

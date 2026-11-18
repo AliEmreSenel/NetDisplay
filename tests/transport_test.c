@@ -23,10 +23,10 @@ static size_t packet(uint8_t *out, uint64_t session, uint32_t seq,
 }
 
 static void reorder_packet(struct nd_reorder *r, struct nd_rx_stats *st,
-                           uint32_t seq, int keyframe, unsigned frag, uint64_t now) {
+                           uint32_t seq, uint32_t flags, unsigned frag, uint64_t now) {
   uint8_t data[ND_FRAG_DATA + 20] = {0}, wire[ND_UDP_PAYLOAD_MAX];
-  struct nd_video_meta meta = {htonl(ND_VIDEO_MAGIC), htonl(keyframe ? ND_VIDEO_KEYFRAME : 0),
-                               htonl(keyframe ? seq : seq - 1u)};
+  struct nd_video_meta meta = {htonl(ND_VIDEO_MAGIC), htonl(flags),
+                               htonl(flags & ND_VIDEO_KEYFRAME ? seq : seq - 1u)};
   memcpy(data, &meta, sizeof(meta));
   size_t n = packet(wire, 8, seq, frag, data, sizeof(data));
   uint32_t magic = htonl(ND_VIDEO_MAGIC); memcpy(wire, &magic, sizeof(magic));
@@ -63,6 +63,52 @@ static void reordering(void) {
   reorder_packet(&r, &st, 7, 1, 1, 5000004);
   CHECK((out = nd_reorder_take(&r)) && out->assembly.seq == 7 && out->assembly.keyframe);
   CHECK(atomic_load(&st.partial_drop) >= 2);
+
+  /* A damaged successor cannot invalidate an earlier frame's valid reference. */
+  nd_reorder_init(&r, 8, a, b);
+  reorder_packet(&r, &st, 10, 1, 0, 100);
+  reorder_packet(&r, &st, 10, 1, 1, 101);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.seq == 10);
+  reorder_packet(&r, &st, 11, 0, 0, 200);
+  unsigned long long partial = atomic_load(&st.partial_drop);
+  reorder_packet(&r, &st, 12, 2, 0, 201);
+  reorder_packet(&r, &st, 12, 2, 1, 202);
+  CHECK(atomic_load(&st.bad) == 1 && !nd_reorder_take(&r));
+  CHECK(atomic_load(&st.partial_drop) == partial);
+  reorder_packet(&r, &st, 11, 0, 1, 203);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.seq == 11);
+
+  /* The budget is also well-defined when the supplied clock starts at zero. */
+  nd_reorder_init(&r, 8, a, b);
+  reorder_packet(&r, &st, 20, 1, 0, 0);
+  reorder_packet(&r, &st, 21, 0, 0, 0);
+  reorder_packet(&r, &st, 21, 0, 1, 0);
+  CHECK(!nd_reorder_take(&r));
+  reorder_packet(&r, &st, 20, 1, 1, 1);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.seq == 20);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.seq == 21);
+
+  /* The deadline belongs to the older frame, even if it fails validation. */
+  nd_reorder_init(&r, 8, a, b);
+  reorder_packet(&r, &st, 30, 2, 0, 100);
+  reorder_packet(&r, &st, 31, 1, 0, 101);
+  reorder_packet(&r, &st, 30, 2, 1, 102);
+  CHECK(!nd_reorder_take(&r));
+  reorder_packet(&r, &st, 31, 1, 1, 101 + ND_REORDER_BUDGET_NS);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.seq == 31 && out->assembly.keyframe);
+
+  /* Receivers without a fixed session must still reject the previous sender. */
+  nd_reorder_init(&r, 0, a, b);
+  uint8_t body[] = {1}, wire[ND_UDP_PAYLOAD_MAX];
+  size_t n = packet(wire, 8, 1, 0, body, sizeof(body));
+  nd_reorder_feed(&r, &st, wire, n, NULL, 100);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.session == 8);
+  n = packet(wire, 9, 1, 0, body, sizeof(body));
+  nd_reorder_feed(&r, &st, wire, n, NULL, 101);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.session == 9);
+  n = packet(wire, 8, 2, 0, body, sizeof(body));
+  nd_reorder_feed(&r, &st, wire, n, NULL, 102);
+  CHECK(!nd_reorder_take(&r));
   free(a); free(b);
 }
 
