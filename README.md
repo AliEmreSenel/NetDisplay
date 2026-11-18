@@ -198,10 +198,12 @@ The source mirrors DPMS and normalized backlight brightness to receivers when
 the required interfaces are available. Missing DPMS or backlight support does
 not stop video.
 
-Before streaming, peers run a short bidirectional UDP probe using the same
-transport and encryption path as video. It reports verified throughput, loss,
-corruption, RTT, and receive-assembly time without changing encoder settings
-or blocking startup on packet loss.
+The startup network probe is off by default. Set `network_test=1` in
+`client.conf` to run a bidirectional UDP probe for each display before video
+starts on every connection. It adds several seconds per display and uses the
+same transport and encryption path as video. The probe reports verified
+throughput, loss, corruption, RTT, and receive-assembly time without changing
+encoder settings. Older sources that do not support the probe skip it.
 
 ## Self-hosting
 

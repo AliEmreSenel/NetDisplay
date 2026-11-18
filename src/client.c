@@ -43,6 +43,7 @@ struct client_cfg {
   int port;
   int want_input;
   int send_power;
+  int network_test;
   int grab_input;
   int reconnect_ms;
   int frame_encryption;
@@ -68,6 +69,15 @@ static void cfg_defaults(struct client_cfg *c) {
    * KMS card number and VAAPI render node are not stable across laptops. */
   c->drm_device[0] = 0;
   c->vaapi_device[0] = 0;
+}
+
+static uint32_t client_hello_flags(const struct client_cfg *c) {
+  return (c->want_input ? NDC_FLAG_WANT_INPUT : 0) |
+         (c->network_test ? NDC_FLAG_NETWORK_TEST : 0) |
+         NDC_FLAG_PREDICTED_VIDEO |
+         (c->send_power ? NDC_FLAG_POWER_INFO : 0) |
+         (c->have_psk ? NDC_FLAG_HAVE_PSK : 0) |
+         (c->frame_encryption ? NDC_FLAG_FRAME_ENCRYPT : 0);
 }
 
 static int parse_display(struct client_cfg *c, const char *value) {
@@ -123,6 +133,8 @@ static void load_cfg(const char *path, struct client_cfg *c, int required) {
       c->port = atoi(v);
     else if (!strcmp(k, "interface"))
       snprintf(c->interface, sizeof(c->interface), "%s", v);
+    else if (!strcmp(k, "network_test"))
+      c->network_test = atoi(v) != 0;
     else if (!strcmp(k, "send_power"))
       c->send_power = atoi(v) != 0;
     else if (!strcmp(k, "want_input"))
@@ -911,12 +923,7 @@ int main(int argc, char **argv) {
       goto retry;
     }
     struct ndc_hello hello = {
-        .flags = htonl((cfg.want_input ? NDC_FLAG_WANT_INPUT : 0) |
-                       NDC_FLAG_NETWORK_TEST |
-                       NDC_FLAG_PREDICTED_VIDEO |
-                       (cfg.send_power ? NDC_FLAG_POWER_INFO : 0) |
-                       (cfg.have_psk ? NDC_FLAG_HAVE_PSK : 0) |
-                       (cfg.frame_encryption ? NDC_FLAG_FRAME_ENCRYPT : 0)),
+        .flags = htonl(client_hello_flags(&cfg)),
         .display_count = htons((uint16_t)display_count),
         .video_codecs = htonl(decoder_caps),
     };
