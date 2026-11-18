@@ -736,12 +736,14 @@ static void *session_main(void *opaque) {
   if (ndc_recv_expected(c, NDC_HELLO, &hello, sizeof(hello)) < 0)
     goto done;
   uint32_t requested = ntohl(hello.flags);
-  uint32_t client_codecs = ntohl(hello.video_codecs) & NDC_CODEC_ALL;
+  uint32_t client_codecs = ntohl(hello.video_codecs);
   unsigned advertised_count = ntohs(hello.display_count);
-  if (!advertised_count || !client_codecs ||
-      advertised_count > (unsigned)cfg->max_displays_per_client)
+  int link_test = (requested & NDC_FLAG_NETWORK_TEST) &&
+                  !advertised_count && !client_codecs;
+  client_codecs &= NDC_CODEC_ALL;
+  if (advertised_count > (unsigned)cfg->max_displays_per_client ||
+      (!link_test && (!advertised_count || !client_codecs)))
     goto done;
-  count = advertised_count;
 
   struct ndc_challenge challenge;
   if (nd_session_server_auth(c, &hello, cfg->have_psk ? cfg->psk : NULL,
@@ -752,7 +754,19 @@ static void *session_main(void *opaque) {
     goto done;
   }
   int encrypted = !!(ntohl(challenge.flags) & NDC_FLAG_FRAME_ENCRYPT);
+  if (link_test) {
+    struct ndc_welcome welcome = {
+        .flags = htonl(NDC_FLAG_NETWORK_TEST |
+                       (encrypted ? NDC_FLAG_FRAME_ENCRYPT : 0)),
+    };
+    if (ndc_send_msg(c, NDC_WELCOME, &welcome, sizeof(welcome)) == 0 &&
+        nd_network_link_test(c, 1, ctx->peer, NULL, &hello, &challenge,
+                             encrypted ? cfg->psk : NULL) < 0)
+      fprintf(stderr, "network speed test failed for receiver %s\n", ctx->peer);
+    goto done;
+  }
 
+  count = advertised_count;
   for (unsigned i = 0; i < count; i++) {
     struct ndc_display d;
     if (ndc_recv_expected(c, NDC_DISPLAY, &d, sizeof(d)) < 0)
@@ -829,8 +843,8 @@ static void *session_main(void *opaque) {
   for (unsigned i = 0; i < count; i++) {
     struct server_stream *st = &streams[i];
     st->video_codec = video_codec;
-    snprintf(st->encoder_name, sizeof(st->encoder_name), "%s",
-             selected_encoders[i]);
+    snprintf(st->encoder_name, sizeof(st->encoder_name), "%.*s",
+             (int)sizeof(selected_encoders[i]) - 1, selected_encoders[i]);
     fprintf(stderr,
             "receiver %s display %u selected codec=%u encoder=%s %dx%d@%d\n",
             ctx->peer, st->display_id, (unsigned)video_codec, st->encoder_name,
@@ -894,6 +908,7 @@ static void *session_main(void *opaque) {
       goto done;
   }
 
+  /* Older clients request a probe at each of their video destination ports. */
   if (requested & NDC_FLAG_NETWORK_TEST) {
     for (unsigned i = 0; i < count; i++) {
       struct server_stream *st = &streams[i];

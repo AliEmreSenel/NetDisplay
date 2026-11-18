@@ -38,3 +38,10 @@ if(NETDISPLAY_BUILD_SERVER)
         $<TARGET_FILE:netdisplay-server> all-intra)
     set_tests_properties(all-intra-control-sessions PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
 endif()
+
+if(NETDISPLAY_BUILD_SERVER AND NETDISPLAY_BUILD_CLIENT AND Python3_Interpreter_FOUND)
+    add_test(NAME standalone-network-probe
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/network_link_test.py"
+            $<TARGET_FILE:netdisplay-server> $<TARGET_FILE:netdisplay-client>)
+    set_tests_properties(standalone-network-probe PROPERTIES TIMEOUT 30)
+endif()

@@ -436,6 +436,118 @@ static int connect_host_ip(const char *ip, int port, const char *ifname) {
   return s;
 }
 
+static int connect_source(const struct client_cfg *cfg, char host_ip[64],
+                          char interface[IFNAMSIZ]) {
+  int port = cfg->port;
+  interface[0] = 0;
+  if (!strcmp(cfg->host, "auto")) {
+    if (discover_host(cfg, host_ip, sizeof(cfg->host), &port,
+                      interface, IFNAMSIZ) < 0)
+      return -1;
+  } else {
+    snprintf(host_ip, sizeof(cfg->host), "%s", cfg->host);
+    snprintf(interface, IFNAMSIZ, "%s", cfg->interface);
+  }
+  int fd = connect_host_ip(host_ip, port, interface);
+  if (fd >= 0) {
+    struct timeval timeout = {.tv_sec = 2};
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  }
+  return fd;
+}
+
+static int authenticate_source(int fd, struct client_cfg *cfg,
+                               struct ndc_hello *hello,
+                               struct ndc_challenge *challenge) {
+  nd_crypto_random(hello->nonce, sizeof(hello->nonce));
+  if (ndc_send_msg(fd, NDC_HELLO, hello, sizeof(*hello)) < 0 ||
+      ndc_recv_expected(fd, NDC_CHALLENGE, challenge, sizeof(*challenge)) < 0)
+    return -1;
+  uint32_t flags = ntohl(challenge->flags);
+  int requires_auth = !!(flags & NDC_FLAG_AUTH_REQUIRED);
+  int uses_password = !!(flags & NDC_FLAG_PASSWORD);
+  int prompted = 0;
+  if (uses_password && !cfg->frame_encryption)
+    fprintf(stderr,
+            "note: password authentication is enabled, but frame_encryption=0; "
+            "UDP remains plaintext\n");
+  if (requires_auth && !cfg->have_psk && !uses_password) {
+    fprintf(stderr, "server requires a PSK; configure psk_file\n");
+    errno = EACCES;
+    return -1;
+  }
+  if (uses_password && cfg->psk_file[0]) {
+    fprintf(stderr, "server requires an interactive password; remove psk_file\n");
+    errno = EINVAL;
+    return -1;
+  }
+  if (uses_password && !cfg->have_psk) {
+    if (input.started) nd_input_prompt(&input, 1);
+    int result = atomic_load(&input.quit) ? -1 : prompt_password(cfg->psk);
+    if (input.started) nd_input_prompt(&input, 0);
+    if (result < 0) {
+      fprintf(stderr, "password entry failed\n");
+      return -1;
+    }
+    cfg->have_psk = prompted = 1;
+  }
+  int result = 0;
+  if (requires_auth != cfg->have_psk ||
+      !!(flags & NDC_FLAG_FRAME_ENCRYPT) != cfg->frame_encryption) {
+    errno = EPROTO;
+    result = -1;
+  } else if (cfg->have_psk) {
+    result = nd_session_client_auth(fd, cfg->psk, hello, challenge);
+  }
+  if (result < 0 && prompted) {
+    explicit_bzero(cfg->psk, sizeof(cfg->psk));
+    cfg->have_psk = 0;
+    if (input.started)
+      fprintf(stderr, "authentication failed; password will be requested again\n");
+  }
+  return result;
+}
+
+static int run_network_test(struct client_cfg *cfg) {
+  char host_ip[sizeof(cfg->host)], interface[IFNAMSIZ];
+  int fd = connect_source(cfg, host_ip, interface);
+  if (fd < 0) {
+    perror("connect to source for network speed test");
+    return 1;
+  }
+
+  int result = 1;
+  struct timeval timeout = {.tv_sec = 10};
+  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+    perror("set network speed test timeout");
+    goto done;
+  }
+  uint32_t mode = NDC_FLAG_NETWORK_TEST |
+                  (cfg->frame_encryption ? NDC_FLAG_FRAME_ENCRYPT : 0);
+  struct ndc_hello hello = {
+      .flags = htonl(mode | (cfg->have_psk ? NDC_FLAG_HAVE_PSK : 0)),
+  };
+  struct ndc_challenge challenge;
+  struct ndc_welcome welcome;
+  if (authenticate_source(fd, cfg, &hello, &challenge) < 0 ||
+      ndc_recv_expected(fd, NDC_WELCOME, &welcome, sizeof(welcome)) < 0 ||
+      ntohl(welcome.flags) != mode || welcome.display_count || welcome.video_codec) {
+    fprintf(stderr, "source did not accept the network speed test; "
+                    "check the source version and authentication settings\n");
+    goto done;
+  }
+  fprintf(stderr, "testing network link to %s\n", host_ip);
+  if (nd_network_link_test(fd, 0, host_ip, interface, &hello, &challenge,
+                           cfg->frame_encryption ? cfg->psk : NULL) < 0) {
+    fprintf(stderr, "network speed test failed during UDP setup or exchange\n");
+    goto done;
+  }
+  result = 0;
+done:
+  close(fd);
+  return result;
+}
+
 static int find_client_backlight(const char *setting, char *dir, size_t dirsz) {
   if (!setting[0] || !strcmp(setting, "none"))
     return -1;
@@ -811,16 +923,24 @@ int main(int argc, char **argv) {
                          atoi(argv[9]), atoi(argv[10]), atoi(argv[11]),
                          atoi(argv[12]), atoi(argv[13]), atoi(argv[14]),
                          strtoull(argv[15], NULL, 16), (uint16_t)atoi(argv[16]));
-  if (argc > 2) {
-    fprintf(stderr, "usage: %s [CLIENT_CONFIG]\n", argv[0]);
+  int network_test = argc > 1 && !strcmp(argv[1], "--network-test");
+  int config_arg = network_test ? 2 : 1;
+  if (argc > config_arg + 1) {
+    fprintf(stderr, "usage: %s [--network-test] [CLIENT_CONFIG]\n", argv[0]);
     return 1;
   }
   char default_cfg[4096];
+  int explicit_config = argc > config_arg;
   const char *cfg_path =
-      argc == 2 ? argv[1]
-                : default_config_path(default_cfg, sizeof(default_cfg));
+      explicit_config ? argv[config_arg]
+                      : default_config_path(default_cfg, sizeof(default_cfg));
   struct client_cfg cfg;
-  load_cfg(cfg_path, &cfg, argc == 2);
+  load_cfg(cfg_path, &cfg, explicit_config);
+  if (network_test) {
+    int result = run_network_test(&cfg);
+    explicit_bzero(cfg.psk, sizeof(cfg.psk));
+    return result;
+  }
   signal(SIGINT, SIG_IGN);
   signal(SIGQUIT, SIG_IGN);
   struct sigaction stop_action = {.sa_handler = request_shutdown};
@@ -878,22 +998,10 @@ int main(int argc, char **argv) {
             displays[i].crtc_id);
 
   while (!atomic_load(&input.quit)) {
-    char host_ip[sizeof(cfg.host)], discovered_if[IFNAMSIZ] = "";
-    int control_port = cfg.port;
-    if (!strcmp(cfg.host, "auto")) {
-      if (discover_host(&cfg, host_ip, sizeof(host_ip), &control_port,
-                        discovered_if, sizeof(discovered_if)) < 0)
-        goto retry;
-    } else {
-      snprintf(host_ip, sizeof(host_ip), "%s", cfg.host);
-      if (cfg.interface[0])
-        snprintf(discovered_if, sizeof(discovered_if), "%s", cfg.interface);
-    }
-    int s = connect_host_ip(host_ip, control_port, discovered_if);
+    char host_ip[sizeof(cfg.host)], discovered_if[IFNAMSIZ];
+    int s = connect_source(&cfg, host_ip, discovered_if);
     if (s < 0)
       goto retry;
-    struct timeval send_timeout = {.tv_sec = 2};
-    (void)setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     nd_input_session(&input, s, 0);
 
     struct client_stream_runtime streams[NDC_MAX_DISPLAYS];
@@ -912,7 +1020,6 @@ int main(int argc, char **argv) {
     }
     struct ndc_hello hello = {
         .flags = htonl((cfg.want_input ? NDC_FLAG_WANT_INPUT : 0) |
-                       NDC_FLAG_NETWORK_TEST |
                        NDC_FLAG_PREDICTED_VIDEO |
                        (cfg.send_power ? NDC_FLAG_POWER_INFO : 0) |
                        (cfg.have_psk ? NDC_FLAG_HAVE_PSK : 0) |
@@ -920,61 +1027,8 @@ int main(int argc, char **argv) {
         .display_count = htons((uint16_t)display_count),
         .video_codecs = htonl(decoder_caps),
     };
-    nd_crypto_random(hello.nonce, sizeof(hello.nonce));
-    int session_ok = ndc_send_msg(s, NDC_HELLO, &hello, sizeof(hello)) == 0;
     struct ndc_challenge challenge;
-    if (session_ok &&
-        ndc_recv_expected(s, NDC_CHALLENGE, &challenge, sizeof(challenge)) < 0)
-      session_ok = 0;
-    uint32_t server_flags = session_ok ? ntohl(challenge.flags) : 0;
-    int server_requires_auth = !!(server_flags & NDC_FLAG_AUTH_REQUIRED);
-    int server_uses_password = !!(server_flags & NDC_FLAG_PASSWORD);
-    if (session_ok && server_uses_password && !cfg.frame_encryption)
-      fprintf(stderr,
-              "note: password authentication is enabled, but frame_encryption=0; "
-              "video UDP remains plaintext\n");
-    int prompted_password = 0, authenticated = 0;
-    if (session_ok && server_requires_auth && !cfg.have_psk &&
-        !server_uses_password) {
-      fprintf(stderr, "server requires a PSK; configure psk_file\n");
-      errno = EACCES;
-      session_ok = 0;
-    } else if (session_ok && server_uses_password && cfg.psk_file[0]) {
-      fprintf(stderr,
-              "server requires an interactive password; remove psk_file\n");
-      errno = EINVAL;
-      session_ok = 0;
-    } else if (session_ok && server_uses_password && !cfg.have_psk) {
-      nd_input_prompt(&input, 1);
-      int password_result = atomic_load(&input.quit) ? -1 : prompt_password(cfg.psk);
-      nd_input_prompt(&input, 0);
-      if (password_result < 0) {
-        fprintf(stderr, "password entry failed\n");
-        session_ok = 0;
-      } else {
-        cfg.have_psk = 1;
-        prompted_password = 1;
-      }
-    }
-    if (session_ok &&
-        (server_requires_auth != cfg.have_psk ||
-         !!(server_flags & NDC_FLAG_FRAME_ENCRYPT) != cfg.frame_encryption)) {
-      errno = EPROTO;
-      session_ok = 0;
-    }
-    if (session_ok && cfg.have_psk) {
-      if (nd_session_client_auth(s, cfg.psk, &hello, &challenge) < 0)
-        session_ok = 0;
-      else
-        authenticated = 1;
-    }
-
-    if (!session_ok && prompted_password && !authenticated) {
-      explicit_bzero(cfg.psk, sizeof(cfg.psk));
-      cfg.have_psk = 0;
-      fprintf(stderr,
-              "authentication failed; password will be requested again\n");
-    }
+    int session_ok = authenticate_source(s, &cfg, &hello, &challenge) == 0;
     for (int i = 0; session_ok && i < display_count; i++) {
       struct ndc_display d = {
           .display_id = htonl((uint32_t)i + 1u),
@@ -1020,22 +1074,6 @@ int main(int argc, char **argv) {
       if (!st->stream_id || !st->port || !st->width || (st->width & 1) ||
           !st->height || (st->height & 1) || !st->refresh_hz)
         session_ok = 0;
-    }
-    if (session_ok && (ntohl(welcome.flags) & NDC_FLAG_NETWORK_TEST)) {
-      for (int i = 0; session_ok && i < display_count; i++) {
-        struct client_stream_runtime *st = &streams[i];
-        uint8_t key[ND_KEY_SIZE] = {0};
-        if (cfg.frame_encryption)
-          nd_crypto_stream_key(key, cfg.psk, st->stream_id, hello.nonce,
-                               challenge.nonce);
-        fprintf(stderr, "testing network for display %u (%d Hz)\n",
-                st->display_id, st->refresh_hz);
-        if (nd_network_test(s, 0, host_ip, st->port, discovered_if,
-                             st->refresh_hz, st->stream_id,
-                             cfg.frame_encryption ? key : NULL) < 0)
-          session_ok = 0;
-        memset(key, 0, sizeof(key));
-      }
     }
     for (int i = 0; session_ok && i < display_count; i++) {
       struct client_stream_runtime *st = &streams[i];

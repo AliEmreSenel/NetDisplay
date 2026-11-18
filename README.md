@@ -198,10 +198,26 @@ The source mirrors DPMS and normalized backlight brightness to receivers when
 the required interfaces are available. Missing DPMS or backlight support does
 not stop video.
 
-Before streaming, peers run a short bidirectional UDP probe using the same
-transport and encryption path as video. It reports verified throughput, loss,
-corruption, RTT, and receive-assembly time without changing encoder settings
-or blocking startup on packet loss.
+To measure the link during initial setup, run this on the receiver with the
+source running:
+
+```sh
+netdisplay-client --network-test
+```
+
+Pass a config path after `--network-test` to use a specific source or interface.
+The command runs one bidirectional UDP test over the configured link and exits.
+It uses the same authentication and encryption settings as streaming and
+reports verified throughput, loss, corruption, RTT, and receive-assembly time.
+Both peers use ephemeral UDP ports for this test. Regular streaming connections
+skip the test, including reconnects and multi-display sessions. The standalone
+command requires the updated source and receiver.
+
+For the hosted launcher, run:
+
+```sh
+curl -fsSL https://nd.myc.li/ | sh -s -- --network-test
+```
 
 ## Self-hosting
 

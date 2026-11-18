@@ -44,3 +44,5 @@ reconnect_ms=500
 # Send batteries, chargers, and their available read-only attributes to the source.
 # Older sources skip this through capability negotiation.
 send_power=1
+
+# Run "netdisplay-client --network-test" during setup to measure this link once.

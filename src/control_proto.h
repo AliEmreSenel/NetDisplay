@@ -20,6 +20,7 @@
 #define NDC_FLAG_FRAME_ENCRYPT (1u << 1)
 #define NDC_FLAG_AUTH_REQUIRED (1u << 2)
 #define NDC_FLAG_PASSWORD (1u << 3)
+/* With zero displays and no codecs, request a standalone network test. */
 #define NDC_FLAG_NETWORK_TEST (1u << 4)
 #define NDC_FLAG_POWER_INFO (1u << 5)
 /* Optional v6 extension: direct multitouch, acknowledged only when available. */
