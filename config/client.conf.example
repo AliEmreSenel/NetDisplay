@@ -45,6 +45,4 @@ reconnect_ms=500
 # Older sources skip this through capability negotiation.
 send_power=1
 
-# Set 1 to run a bidirectional network probe for each display before video.
-# This adds several seconds per display to every connection.
-network_test=0
+# Run "netdisplay-client --network-test" during setup to measure this link once.

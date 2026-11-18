@@ -22,7 +22,13 @@ case "${1:-}" in
     --server) MODE=server; shift ;;
     --client) shift ;;
 esac
-[ "$#" -le 1 ] || fail "usage: sh [--client|--server] [CONFIG]"
+NETWORK_TEST=0
+if [ "${1:-}" = --network-test ]; then
+    [ "$MODE" = client ] || fail "--network-test runs on the client"
+    NETWORK_TEST=1
+    shift
+fi
+[ "$#" -le 1 ] || fail "usage: sh [--client [--network-test] | --server] [CONFIG]"
 DEFAULT_CONFIG=0
 
 DISTRO_ID=unknown
@@ -233,6 +239,11 @@ if [ "$MODE" = server ] && [ "$DEFAULT_CONFIG" -eq 1 ]; then
     chmod 0600 "$CONFIG"
 fi
 
-say "starting $MODE"
+if [ "$NETWORK_TEST" -eq 1 ]; then
+    say "running the network speed test"
+    set -- --network-test "$@"
+else
+    say "starting $MODE"
+fi
 trap - EXIT HUP INT TERM
 exec "$BIN" "$@"

@@ -267,7 +267,7 @@ int nd_network_test(int control, int server, const char *peer, int video_port,
   struct probe p = {.fd = -1, .control = control, .session = session,
                     .fps = fps > 240 ? 240 : fps, .encrypted = key != NULL};
   int result = -1;
-  if (p.fps < 1 || !session || video_port < 1 || video_port > 65535) return -1;
+  if (p.fps < 1 || !session || video_port < 0 || video_port > 65535) return -1;
   /* Keep delayed probe packets out of the subsequent video sequence space,
    * including when frame encryption is disabled. */
   p.session = session ^ 0x4e4450524f424531ull;
@@ -289,15 +289,26 @@ int nd_network_test(int control, int server, const char *peer, int video_port,
   struct sockaddr_in local = {.sin_family = AF_INET,
       .sin_port = server ? 0 : htons((uint16_t)video_port),
       .sin_addr.s_addr = htonl(INADDR_ANY)};
-  if (bind(p.fd, (struct sockaddr *)&local, sizeof(local)) < 0) goto done;
   socklen_t length = sizeof(local);
+  if (!video_port) {
+    if (getsockname(control, (struct sockaddr *)&local, &length) < 0 ||
+        local.sin_family != AF_INET)
+      goto done;
+    local.sin_port = 0;
+  }
+  if (bind(p.fd, (struct sockaddr *)&local, sizeof(local)) < 0) goto done;
+  length = sizeof(local);
   if (getsockname(p.fd, (struct sockaddr *)&local, &length) < 0) goto done;
-  uint16_t port = local.sin_port;
-  if (server) {
-    if (ndc_send_msg(control, NDC_TEST_PORT, &port, sizeof(port)) < 0) goto done;
-    port = htons((uint16_t)video_port);
-  } else if (recv_control(control, NDC_TEST_PORT, &port, sizeof(port)) < 0 || !port)
-    goto done;
+  uint16_t port = htons((uint16_t)video_port);
+  if (server || !video_port) {
+    if (ndc_send_msg(control, NDC_TEST_PORT, &local.sin_port,
+                     sizeof(local.sin_port)) < 0)
+      goto done;
+  }
+  if (!server || !video_port) {
+    if (recv_control(control, NDC_TEST_PORT, &port, sizeof(port)) < 0 || !port)
+      goto done;
+  }
   struct sockaddr_in remote = {.sin_family = AF_INET, .sin_port = port};
   if (inet_pton(AF_INET, peer, &remote.sin_addr) != 1 ||
       connect(p.fd, (struct sockaddr *)&remote, sizeof(remote)) < 0) goto done;
@@ -332,5 +343,22 @@ done:
   free(p.receive);
   free(p.latest);
   close(p.fd);
+  return result;
+}
+
+int nd_network_link_test(int control, int server, const char *peer,
+                         const char *interface_name, const struct ndc_hello *hello,
+                         const struct ndc_challenge *challenge, const uint8_t *psk) {
+  /* Use the fresh server nonce to identify this display-independent test. */
+  uint64_t wire_session;
+  memcpy(&wire_session, challenge->nonce, sizeof(wire_session));
+  uint64_t session = nd_ntoh64(wire_session);
+  if (!session) session = 1;
+  uint8_t key[ND_KEY_SIZE] = {0};
+  if (psk)
+    nd_crypto_stream_key(key, psk, session, hello->nonce, challenge->nonce);
+  int result = nd_network_test(control, server, peer, 0, interface_name,
+                               ND_DEFAULT_FPS, session, psk ? key : NULL);
+  sodium_memzero(key, sizeof(key));
   return result;
 }

@@ -39,12 +39,9 @@ if(NETDISPLAY_BUILD_SERVER)
     set_tests_properties(all-intra-control-sessions PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
 endif()
 
-if(NETDISPLAY_BUILD_CLIENT)
-    add_executable(netdisplay-client-config-test client_config_test.c ../src/video_receiver.c)
-    get_target_property(CLIENT_LINK_LIBRARIES netdisplay-client LINK_LIBRARIES)
-    target_link_libraries(netdisplay-client-config-test PRIVATE ${CLIENT_LINK_LIBRARIES})
-    if(NETDISPLAY_STATIC_CLIENT_PREFIX)
-        target_include_directories(netdisplay-client-config-test PRIVATE "${ND_AV_INCLUDE}" "${ND_DRM_INCLUDE}")
-    endif()
-    add_test(NAME client-network-test-config COMMAND netdisplay-client-config-test)
+if(NETDISPLAY_BUILD_SERVER AND NETDISPLAY_BUILD_CLIENT AND Python3_Interpreter_FOUND)
+    add_test(NAME standalone-network-probe
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/network_link_test.py"
+            $<TARGET_FILE:netdisplay-server> $<TARGET_FILE:netdisplay-client>)
+    set_tests_properties(standalone-network-probe PROPERTIES TIMEOUT 30)
 endif()
