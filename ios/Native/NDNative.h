@@ -25,7 +25,9 @@ void nd_ios_assembler_destroy(NDIOSAssembler *assembler);
  * -1 = malformed/authentication failure. Never accepts another session. */
 int nd_ios_assembler_feed(NDIOSAssembler *assembler, const uint8_t *packet,
                            size_t size);
-/* Valid until the next feed. Copy/consume before returning to the RX loop. */
+/* Drain any additional frame immediately after feed. */
+int nd_ios_assembler_next(NDIOSAssembler *assembler);
+/* Valid until the next feed or drain. Copy/consume before returning to the RX loop. */
 const uint8_t *nd_ios_assembler_bytes(const NDIOSAssembler *assembler);
 NDIOSStats nd_ios_assembler_stats(const NDIOSAssembler *assembler);
 #endif

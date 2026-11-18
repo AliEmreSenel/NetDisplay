@@ -852,7 +852,7 @@ static int seq_newer(uint32_t a, uint32_t b) { return (int32_t)(a - b) > 0; }
 struct rx_ctx {
   int sock;
   struct nd_frame_queue *mailbox;
-  uint8_t *assembly_buf;
+  uint8_t *assembly_buf, *reorder_buf;
   struct nd_rx_stats *stats;
   int encrypted;
   uint64_t wire_session;
@@ -861,23 +861,27 @@ struct rx_ctx {
 
 static void *rx_thread_main(void *opaque) {
   struct rx_ctx *rx = opaque;
-  struct nd_assembly assembly = {.expected_session = rx->wire_session};
+  struct nd_reorder reorder;
+  nd_reorder_init(&reorder, rx->wire_session, rx->assembly_buf, rx->reorder_buf);
   uint8_t datagram[ND_UDP_PAYLOAD_MAX];
   for (;;) {
     ssize_t n = recv(rx->sock, datagram, sizeof(datagram), MSG_TRUNC);
     if (n < 0 && errno == EINTR) continue;
     if (n < 0) { perror("recv"); return NULL; }
-    if (nd_frame_receive(&assembly, rx->stats, rx->assembly_buf, datagram,
-                          (size_t)n, rx->encrypted ? rx->key : NULL)) {
-      memset(rx->assembly_buf + assembly.offset + assembly.size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
-      struct nd_frame_slot frame = {.buffer = rx->assembly_buf,
-          .size = assembly.size, .seq = assembly.seq, .session = assembly.session,
-          .first_ns = assembly.first_ns, .complete_ns = assembly.complete_ns,
-          .offset = assembly.offset, .reference = assembly.reference,
-          .keyframe = assembly.keyframe};
+    nd_reorder_feed(&reorder, rx->stats, datagram, (size_t)n,
+                    rx->encrypted ? rx->key : NULL, nd_now_ns());
+    struct nd_reorder_slot *slot;
+    while ((slot = nd_reorder_take(&reorder))) {
+      struct nd_assembly *assembly = &slot->assembly;
+      memset(slot->buffer + assembly->offset + assembly->size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+      struct nd_frame_slot frame = {.buffer = slot->buffer,
+          .size = assembly->size, .seq = assembly->seq, .session = assembly->session,
+          .first_ns = assembly->first_ns, .complete_ns = assembly->complete_ns,
+          .offset = assembly->offset, .reference = assembly->reference,
+          .keyframe = assembly->keyframe};
       unsigned dropped = nd_frame_queue_publish(rx->mailbox, &frame);
       atomic_fetch_add(&rx->stats->latest_overwrite, dropped);
-      rx->assembly_buf = frame.buffer;
+      slot->buffer = frame.buffer;
     }
   }
 }
@@ -1035,10 +1039,12 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
       .sock = s,
       .mailbox = &mailbox,
       .assembly_buf = assembly_buf,
+      .reorder_buf = av_malloc(ND_MAX_WIRE_FRAME + AV_INPUT_BUFFER_PADDING_SIZE),
       .stats = &stats,
       .encrypted = encrypted,
       .wire_session = wire_session,
   };
+  if (!rx.reorder_buf) die("allocate reorder buffer");
   if (encrypted) {
     if (key_fd < 0 || ndc_read_full(key_fd, rx.key, sizeof(rx.key)) <= 0)
       die("read video key");

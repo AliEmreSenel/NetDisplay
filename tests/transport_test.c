@@ -22,6 +22,50 @@ static size_t packet(uint8_t *out, uint64_t session, uint32_t seq,
   return n + sizeof(h);
 }
 
+static void reorder_packet(struct nd_reorder *r, struct nd_rx_stats *st,
+                           uint32_t seq, int keyframe, unsigned frag, uint64_t now) {
+  uint8_t data[ND_FRAG_DATA + 20] = {0}, wire[ND_UDP_PAYLOAD_MAX];
+  struct nd_video_meta meta = {htonl(ND_VIDEO_MAGIC), htonl(keyframe ? ND_VIDEO_KEYFRAME : 0),
+                               htonl(keyframe ? seq : seq - 1u)};
+  memcpy(data, &meta, sizeof(meta));
+  size_t n = packet(wire, 8, seq, frag, data, sizeof(data));
+  uint32_t magic = htonl(ND_VIDEO_MAGIC); memcpy(wire, &magic, sizeof(magic));
+  nd_reorder_feed(r, st, wire, n, NULL, now);
+}
+static void reordering(void) {
+  uint8_t *a = malloc(ND_MAX_WIRE_FRAME), *b = malloc(ND_MAX_WIRE_FRAME);
+  CHECK(a && b);
+  struct nd_reorder r; struct nd_rx_stats st = {0}; struct nd_reorder_slot *out;
+  nd_reorder_init(&r, 8, a, b);
+  reorder_packet(&r, &st, UINT32_MAX, 1, 0, 100);
+  reorder_packet(&r, &st, UINT32_MAX, 1, 1, 101);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.seq == UINT32_MAX);
+  reorder_packet(&r, &st, 0, 0, 0, 200);
+  reorder_packet(&r, &st, 0, 0, 0, 201); /* duplicate predecessor */
+  reorder_packet(&r, &st, 1, 0, 0, 202);
+  reorder_packet(&r, &st, 1, 0, 0, 203); /* duplicate successor */
+  reorder_packet(&r, &st, 1, 0, 1, 204);
+  CHECK(!nd_reorder_take(&r));
+  reorder_packet(&r, &st, 0, 0, 1, 205);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.seq == 0);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.seq == 1);
+  CHECK(!nd_reorder_take(&r) && atomic_load(&st.dup) == 2);
+  reorder_packet(&r, &st, 2, 0, 0, 300);
+  reorder_packet(&r, &st, 3, 0, 0, 301);
+  reorder_packet(&r, &st, 3, 0, 1, 302);
+  reorder_packet(&r, &st, 2, 0, 1, 301 + ND_REORDER_BUDGET_NS);
+  CHECK(!nd_reorder_take(&r)); /* expired predecessor and broken successor */
+  reorder_packet(&r, &st, 5, 0, 0, 5000000);
+  reorder_packet(&r, &st, 5, 0, 1, 5000001);
+  CHECK(!nd_reorder_take(&r)); /* missing reference */
+  reorder_packet(&r, &st, 6, 0, 0, 5000002);
+  reorder_packet(&r, &st, 7, 1, 0, 5000003);
+  reorder_packet(&r, &st, 7, 1, 1, 5000004);
+  CHECK((out = nd_reorder_take(&r)) && out->assembly.seq == 7 && out->assembly.keyframe);
+  CHECK(atomic_load(&st.partial_drop) >= 2);
+  free(a); free(b);
+}
+
 static int cancel(void *p) { return *(int *)p; }
 
 static void prediction_queue(void) {
@@ -189,6 +233,7 @@ int main(void) {
   CHECK(!nd_frame_receive(&a, &st, buffer, wire, n, key));
   CHECK(atomic_load(&st.bad) == 3);
   video_metadata(sockets, key, buffer, scratch);
+  reordering();
   close(sockets[0]); close(sockets[1]);
   free(buffer); free(scratch);
   return 0;
