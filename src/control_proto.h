@@ -6,7 +6,7 @@
 
 #define NDC_MAGIC 0x4e444333u      /* NDC3 */
 #define NDC_DISC_MAGIC 0x4e444344u /* NDCD */
-#define NDC_VERSION 6u
+#define NDC_VERSION 7u
 #define NDC_DEFAULT_PORT 5001u
 #define NDC_DEFAULT_VIDEO_PORT 5000u
 #define NDC_MAX_PAYLOAD 512u
@@ -14,6 +14,11 @@
 #define NDC_NAME_MAX 64u
 #define NDC_NONCE_SIZE 16u
 #define NDC_AUTH_SIZE 32u
+#define NDC_SALT_SIZE 16u
+#define NDC_SHARE_SIZE 32u
+/* A sealed message carries its real type and a Poly1305 tag. */
+#define NDC_SEAL_OVERHEAD 18u
+#define NDC_MAX_WIRE (NDC_MAX_PAYLOAD + NDC_SEAL_OVERHEAD)
 
 #define NDC_FLAG_WANT_INPUT (1u << 0)
 #define NDC_FLAG_INPUT_ALLOWED (1u << 0)
@@ -90,6 +95,8 @@ enum ndc_type {
   NDC_POWER_DEVICE = 20,
   NDC_POWER_PROPERTY = 21,
   NDC_POWER_END = 22,
+  /* Outer type of every message after an authenticated handshake. */
+  NDC_SEALED = 23,
 };
 
 enum ndc_discovery_type {
@@ -114,12 +121,24 @@ struct __attribute__((packed)) ndc_hello {
   uint8_t nonce[NDC_NONCE_SIZE];
 };
 
+/* Source -> receiver. With authentication, share is the source's
+ * password-authenticated key exchange element and salt is the password
+ * salt (zero for a PSK). Both are zero without authentication. */
 struct __attribute__((packed)) ndc_challenge {
   uint32_t flags;
   uint8_t nonce[NDC_NONCE_SIZE];
+  uint8_t salt[NDC_SALT_SIZE];
+  uint8_t share[NDC_SHARE_SIZE];
 };
 
+/* Receiver -> source: the receiver's key exchange element and its key
+ * confirmation. The source answers with ndc_auth_reply. */
 struct __attribute__((packed)) ndc_auth {
+  uint8_t share[NDC_SHARE_SIZE];
+  uint8_t proof[NDC_AUTH_SIZE];
+};
+
+struct __attribute__((packed)) ndc_auth_reply {
   uint8_t proof[NDC_AUTH_SIZE];
 };
 

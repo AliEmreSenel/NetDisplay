@@ -26,6 +26,8 @@ def value(name):
                 return a << b
             if isinstance(node.op, ast.BitOr):
                 return a | b
+            if isinstance(node.op, ast.Add):
+                return a + b
         raise ValueError(f'Unsupported wire constant: {name}')
 
     return integer(ast.parse(expression, mode='eval').body)
@@ -42,6 +44,10 @@ def generate():
             ('maxPayload', 'NDC_MAX_PAYLOAD', 'Int'),
             ('nonceSize', 'NDC_NONCE_SIZE', 'Int'),
             ('authSize', 'NDC_AUTH_SIZE', 'Int'),
+            ('saltSize', 'NDC_SALT_SIZE', 'Int'),
+            ('shareSize', 'NDC_SHARE_SIZE', 'Int'),
+            ('sealOverhead', 'NDC_SEAL_OVERHEAD', 'Int'),
+            ('maxWire', 'NDC_MAX_WIRE', 'Int'),
             ('nameMax', 'NDC_NAME_MAX', 'Int'),
             ('udpPayloadMax', 'ND_UDP_PAYLOAD_MAX', 'Int'),
             ('videoQueueCapacity', 'ND_VIDEO_QUEUE_CAPACITY', 'Int'),

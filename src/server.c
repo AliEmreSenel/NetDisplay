@@ -17,11 +17,12 @@
 #include <linux/uinput.h>
 #include <poll.h>
 #include <pthread.h>
-#include <sodium/core.h>
+#include <sodium.h>
 #include <spawn.h>
 #include <stdatomic.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 
 extern char **environ;
 static const char *self_program;
@@ -44,8 +45,9 @@ struct host_cfg {
   int max_width, max_height, max_fps;
   int frame_encryption; /* 0=off, 1=allowed, 2=required */
   char psk_file[512];
-  char password_key[ND_KEY_SIZE * 2u + 1u];
+  char password_key[ND_PASSWORD_KEY_TEXT];
   uint8_t psk[ND_KEY_SIZE];
+  uint8_t password_salt[ND_SALT_SIZE];
   int have_psk;
   int password_auth;
   char connect_cmd[2048];
@@ -189,11 +191,17 @@ static void load_cfg(const char *path, struct host_cfg *c) {
       die(c->psk_file);
     c->have_psk = 1;
   } else if (c->password_key[0]) {
-    if (nd_crypto_key_from_hex(c->psk, c->password_key) < 0) {
-      fprintf(stderr,
-              "password_key must contain exactly 64 hexadecimal characters\n");
+    int legacy = 0;
+    if (nd_crypto_parse_password_key(c->password_key, c->password_salt, c->psk,
+                                     &legacy) < 0) {
+      fprintf(stderr, "password_key must be the output of "
+                      "--derive-password-key\n");
       exit(2);
     }
+    if (legacy)
+      fprintf(stderr,
+              "warning: password_key uses the salt shared by every NetDisplay "
+              "install; rerun --derive-password-key to give it its own salt\n");
     c->have_psk = 1;
     c->password_auth = 1;
   }
@@ -234,14 +242,15 @@ static int derive_password_key_cli(void) {
     if (!password[0])
       goto invalid;
   }
-  uint8_t key[ND_KEY_SIZE];
-  char hex[ND_KEY_SIZE * 2u + 1u];
-  if (nd_crypto_password_key(key, password) < 0) {
+  uint8_t key[ND_KEY_SIZE], salt[ND_SALT_SIZE];
+  char hex[ND_PASSWORD_KEY_TEXT];
+  nd_crypto_random(salt, sizeof(salt));
+  if (nd_crypto_password_key(key, password, salt) < 0) {
     explicit_bzero(password, sizeof(password));
     explicit_bzero(confirm, sizeof(confirm));
     return 1;
   }
-  nd_crypto_key_to_hex(hex, key);
+  nd_crypto_format_password_key(hex, salt, key);
   puts(hex);
   explicit_bzero(key, sizeof(key));
   explicit_bzero(hex, sizeof(hex));
@@ -472,6 +481,92 @@ static int valid_wire_name(const char *name) {
 
 static _Atomic int session_count;
 
+/* Every live session socket, so a stop request can end the sessions and let
+ * each one run its disconnect hooks. A session removes itself before it
+ * closes its socket, so shutdown never reaches a reused descriptor. */
+static struct {
+  pthread_mutex_t mutex;
+  pthread_cond_t idle;
+  int fds[32];
+  unsigned count;
+  int stopping;
+} live = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, {0}, 0, 0};
+
+static int live_add(int fd) {
+  pthread_mutex_lock(&live.mutex);
+  int ok = !live.stopping && live.count < sizeof(live.fds) / sizeof(live.fds[0]);
+  if (ok)
+    live.fds[live.count++] = fd;
+  pthread_mutex_unlock(&live.mutex);
+  return ok ? 0 : -1;
+}
+
+static void live_remove(int fd) {
+  pthread_mutex_lock(&live.mutex);
+  for (unsigned i = 0; i < live.count; i++) {
+    if (live.fds[i] != fd)
+      continue;
+    live.fds[i] = live.fds[--live.count];
+    break;
+  }
+  if (!live.count)
+    pthread_cond_broadcast(&live.idle);
+  pthread_mutex_unlock(&live.mutex);
+}
+
+/* Ends every session and waits for their hooks, at most timeout_s. */
+static void live_stop(int timeout_s) {
+  pthread_mutex_lock(&live.mutex);
+  live.stopping = 1;
+  for (unsigned i = 0; i < live.count; i++)
+    shutdown(live.fds[i], SHUT_RDWR);
+  struct timespec deadline;
+  clock_gettime(CLOCK_REALTIME, &deadline);
+  deadline.tv_sec += timeout_s;
+  while (live.count &&
+         pthread_cond_timedwait(&live.idle, &live.mutex, &deadline) == 0) {
+  }
+  if (live.count)
+    fprintf(stderr, "%u session(s) still running at exit\n", live.count);
+  pthread_mutex_unlock(&live.mutex);
+}
+
+/* Written by signal handlers and the Wayland watcher; read by main. */
+static int stop_pipe[2] = {-1, -1};
+
+static void request_stop(int status) {
+  uint8_t b = (uint8_t)status;
+  ssize_t n;
+  do {
+    n = write(stop_pipe[1], &b, 1);
+  } while (n < 0 && errno == EINTR);
+}
+
+static void stop_signal(int sig) {
+  int saved = errno;
+  (void)sig;
+  request_stop(0);
+  errno = saved;
+}
+
+static void compositor_lost(void *opaque) {
+  (void)opaque;
+  fprintf(stderr, "compositor is gone; exiting so the service restarts with "
+                  "the new session's environment\n");
+  request_stop(1);
+}
+
+/* Children must not inherit the stop signals blocked in worker threads. */
+static int spawn_attr_init(posix_spawnattr_t *attr, short flags) {
+  int e = posix_spawnattr_init(attr);
+  if (e)
+    return e;
+  sigset_t none;
+  sigemptyset(&none);
+  (void)posix_spawnattr_setsigmask(attr, &none);
+  return posix_spawnattr_setflags(attr, flags | POSIX_SPAWN_SETSIGMASK);
+}
+
 static int make_discovery_socket(const struct host_cfg *cfg) {
   int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
   if (s < 0)
@@ -612,11 +707,9 @@ static pid_t spawn_builtin_sender(const struct host_cfg *cfg, const char *peer,
     if (e)
       goto fail;
   }
-  e = posix_spawnattr_init(&attr);
+  e = spawn_attr_init(&attr, POSIX_SPAWN_SETPGROUP);
   if (e != 0)
     goto fail;
-  short flags = POSIX_SPAWN_SETPGROUP;
-  (void)posix_spawnattr_setflags(&attr, flags);
   (void)posix_spawnattr_setpgroup(&attr, 0);
 
   pid_t p = -1;
@@ -662,9 +755,12 @@ fail:
   return -1;
 }
 
+enum { HOOK_VARS = 11 };
+
 static int run_stream_hook(const struct host_cfg *cfg, const char *peer,
-                           const struct server_stream *st, const char *cmd) {
-  char vars[10][256];
+                           const struct server_stream *st, const char *cmd,
+                           int stale) {
+  char vars[HOOK_VARS][256];
   snprintf(vars[0], sizeof(vars[0]), "ND_PEER_IP=%s", peer);
   snprintf(vars[1], sizeof(vars[1]), "ND_OUTPUT=%s", st->output);
   snprintf(vars[2], sizeof(vars[2]), "ND_CONNECTOR=%s", st->connector);
@@ -676,17 +772,18 @@ static int run_stream_hook(const struct host_cfg *cfg, const char *peer,
   snprintf(vars[8], sizeof(vars[8]), "ND_DISPLAY_ID=%u", st->display_id);
 
   snprintf(vars[9], sizeof(vars[9]), "ND_TOUCH_DEVICE=%s", st->touch_device);
+  snprintf(vars[10], sizeof(vars[10]), "ND_STALE=%d", stale);
 
   size_t inherited = 0;
   while (environ[inherited])
     inherited++;
-  char **envp = calloc(inherited + 11u, sizeof(*envp));
+  char **envp = calloc(inherited + HOOK_VARS + 1u, sizeof(*envp));
   if (!envp)
     return -1;
   size_t n = 0;
   for (size_t i = 0; i < inherited; i++) {
     int replace = 0;
-    for (size_t v = 0; v < 10; v++) {
+    for (size_t v = 0; v < HOOK_VARS; v++) {
       size_t key_len = (size_t)(strchr(vars[v], '=') - vars[v]);
       if (!strncmp(environ[i], vars[v], key_len) &&
           environ[i][key_len] == '=') {
@@ -697,13 +794,18 @@ static int run_stream_hook(const struct host_cfg *cfg, const char *peer,
     if (!replace)
       envp[n++] = environ[i];
   }
-  for (size_t v = 0; v < 10; v++)
+  for (size_t v = 0; v < HOOK_VARS; v++)
     envp[n++] = vars[v];
   envp[n] = NULL;
 
   char *const av[] = {(char *)"sh", (char *)"-c", (char *)cmd, NULL};
   pid_t pid = -1;
-  int e = posix_spawn(&pid, "/bin/sh", NULL, NULL, av, envp);
+  posix_spawnattr_t attr;
+  int e = spawn_attr_init(&attr, 0);
+  if (!e) {
+    e = posix_spawn(&pid, "/bin/sh", NULL, &attr, av, envp);
+    posix_spawnattr_destroy(&attr);
+  }
   free(envp);
   if (e) {
     errno = e;
@@ -722,6 +824,9 @@ static void *session_main(void *opaque) {
   struct session_ctx *ctx = opaque;
   const struct host_cfg *cfg = ctx->cfg;
   int c = ctx->fd;
+  struct nd_channel ch;
+  nd_channel_init(&ch, c);
+  uint8_t video_key[ND_KEY_SIZE] = {0};
   struct server_stream streams[NDC_MAX_DISPLAYS];
   memset(streams, 0, sizeof(streams));
   for (unsigned i = 0; i < NDC_MAX_DISPLAYS; i++)
@@ -733,7 +838,7 @@ static void *session_main(void *opaque) {
   nd_power_sink_init(&power_sink);
 
   struct ndc_hello hello;
-  if (ndc_recv_expected(c, NDC_HELLO, &hello, sizeof(hello)) < 0)
+  if (ndc_recv_expected(&ch, NDC_HELLO, &hello, sizeof(hello)) < 0)
     goto done;
   uint32_t requested = ntohl(hello.flags);
   uint32_t client_codecs = ntohl(hello.video_codecs);
@@ -746,9 +851,9 @@ static void *session_main(void *opaque) {
     goto done;
 
   struct ndc_challenge challenge;
-  if (nd_session_server_auth(c, &hello, cfg->have_psk ? cfg->psk : NULL,
-                             cfg->password_auth, cfg->frame_encryption,
-                             &challenge) < 0) {
+  if (nd_session_server_auth(&ch, &hello, cfg->have_psk ? cfg->psk : NULL,
+                             cfg->password_auth ? cfg->password_salt : NULL,
+                             cfg->frame_encryption, &challenge, video_key) < 0) {
     fprintf(stderr, "receiver %s authentication/encryption negotiation failed\n",
             ctx->peer);
     goto done;
@@ -759,9 +864,9 @@ static void *session_main(void *opaque) {
         .flags = htonl(NDC_FLAG_NETWORK_TEST |
                        (encrypted ? NDC_FLAG_FRAME_ENCRYPT : 0)),
     };
-    if (ndc_send_msg(c, NDC_WELCOME, &welcome, sizeof(welcome)) == 0 &&
-        nd_network_link_test(c, 1, ctx->peer, NULL, &hello, &challenge,
-                             encrypted ? cfg->psk : NULL) < 0)
+    if (ndc_send_msg(&ch, NDC_WELCOME, &welcome, sizeof(welcome)) == 0 &&
+        nd_network_link_test(&ch, 1, ctx->peer, NULL, &challenge,
+                             encrypted ? video_key : NULL) < 0)
       fprintf(stderr, "network speed test failed for receiver %s\n", ctx->peer);
     goto done;
   }
@@ -769,7 +874,7 @@ static void *session_main(void *opaque) {
   count = advertised_count;
   for (unsigned i = 0; i < count; i++) {
     struct ndc_display d;
-    if (ndc_recv_expected(c, NDC_DISPLAY, &d, sizeof(d)) < 0)
+    if (ndc_recv_expected(&ch, NDC_DISPLAY, &d, sizeof(d)) < 0)
       goto done;
     d.connector[NDC_NAME_MAX - 1] = 0;
     struct server_stream *st = &streams[i];
@@ -793,8 +898,7 @@ static void *session_main(void *opaque) {
     snprintf(st->output, sizeof(st->output), "%.40s-%u-%u", cfg->output,
              ctx->serial, st->display_id);
     if (encrypted)
-      nd_crypto_stream_key(st->key, cfg->psk, st->stream_id, hello.nonce,
-                           challenge.nonce);
+      nd_crypto_stream_key(st->key, video_key, st->stream_id);
   }
 
   /* Try complete codec/backend combinations once and keep the selected
@@ -836,7 +940,7 @@ static void *session_main(void *opaque) {
   if (!video_codec) {
     fprintf(stderr, "receiver %s has no mutually usable hardware video codec%s\n",
             ctx->peer, cfg->video_codec ? " for forced video_codec" : "");
-    (void)ndc_send_msg(c, NDC_REJECT, NULL, 0);
+    (void)ndc_send_msg(&ch, NDC_REJECT, NULL, 0);
     goto done;
   }
 
@@ -858,7 +962,7 @@ static void *session_main(void *opaque) {
         (requested & NDC_FLAG_TOUCHSCREEN))
       snprintf(st->touch_device, sizeof(st->touch_device), "netdisplay-touch-%u", ctx->serial);
     if (cfg->connect_cmd[0]) {
-      int rc = run_stream_hook(cfg, ctx->peer, st, cfg->connect_cmd);
+      int rc = run_stream_hook(cfg, ctx->peer, st, cfg->connect_cmd, 0);
       if (rc) {
         fprintf(stderr, "connect_cmd exited %d\n", rc);
         goto done;
@@ -891,7 +995,7 @@ static void *session_main(void *opaque) {
       .display_count = htons((uint16_t)count),
       .video_codec = htons(video_codec),
   };
-  if (ndc_send_msg(c, NDC_WELCOME, &welcome, sizeof(welcome)) < 0)
+  if (ndc_send_msg(&ch, NDC_WELCOME, &welcome, sizeof(welcome)) < 0)
     goto done;
   for (unsigned i = 0; i < count; i++) {
     struct server_stream *st = &streams[i];
@@ -904,7 +1008,7 @@ static void *session_main(void *opaque) {
         .refresh_hz = htons((uint16_t)st->refresh_hz),
     };
     snprintf(wire.output, sizeof(wire.output), "%s", st->output);
-    if (ndc_send_msg(c, NDC_STREAM, &wire, sizeof(wire)) < 0)
+    if (ndc_send_msg(&ch, NDC_STREAM, &wire, sizeof(wire)) < 0)
       goto done;
   }
 
@@ -912,7 +1016,7 @@ static void *session_main(void *opaque) {
   if (requested & NDC_FLAG_NETWORK_TEST) {
     for (unsigned i = 0; i < count; i++) {
       struct server_stream *st = &streams[i];
-      if (nd_network_test(c, 1, ctx->peer, st->port, NULL, st->refresh_hz,
+      if (nd_network_test(&ch, 1, ctx->peer, st->port, NULL, st->refresh_hz,
                            st->stream_id, encrypted ? st->key : NULL) < 0) {
         fprintf(stderr, "network test failed for %s display %u\n",
                 ctx->peer, st->display_id);
@@ -923,7 +1027,7 @@ static void *session_main(void *opaque) {
 
   for (unsigned ready = 0; ready < count; ready++) {
     struct ndc_stream_ready r;
-    if (ndc_recv_expected(c, NDC_STREAM_READY, &r, sizeof(r)) < 0)
+    if (ndc_recv_expected(&ch, NDC_STREAM_READY, &r, sizeof(r)) < 0)
       goto done;
     uint32_t id = ntohl(r.display_id);
     struct server_stream *st = NULL;
@@ -939,7 +1043,7 @@ static void *session_main(void *opaque) {
       goto done;
   }
 
-  if (nd_display_state_attach(ctx->display_state, c) < 0)
+  if (nd_display_state_attach(ctx->display_state, &ch) < 0)
     goto done;
   attached = 1;
   fprintf(stderr, "receiver %s running %u display(s), codec=%u encryption %s\n",
@@ -955,7 +1059,7 @@ static void *session_main(void *opaque) {
       if (waitpid(streams[i].video_pid, &status, WNOHANG) ==
           streams[i].video_pid) {
         streams[i].video_pid = -1;
-        (void)nd_display_state_send(ctx->display_state, c, NDC_STOP, NULL, 0);
+        (void)nd_display_state_send(ctx->display_state, &ch, NDC_STOP, NULL, 0);
         goto done;
       }
     }
@@ -971,7 +1075,7 @@ static void *session_main(void *opaque) {
     uint8_t b[NDC_MAX_PAYLOAD];
     uint32_t len = sizeof(b);
     uint16_t type;
-    int rr = ndc_recv_msg(c, &type, b, &len);
+    int rr = ndc_recv_msg(&ch, &type, b, &len);
     if (rr <= 0)
       goto done;
     if (type == NDC_INPUT && input_allowed && len == sizeof(struct ndc_input)) {
@@ -989,7 +1093,7 @@ static void *session_main(void *opaque) {
         free(snapshot);
       }
     } else if (type == NDC_PING && len == 0) {
-      if (nd_display_state_send(ctx->display_state, c, NDC_PONG, NULL, 0) < 0)
+      if (nd_display_state_send(ctx->display_state, &ch, NDC_PONG, NULL, 0) < 0)
         goto done;
     } else if (!(type == NDC_PONG && len == 0))
       goto done;
@@ -1000,19 +1104,86 @@ done:
   nd_power_sink_clear(&power_sink);
   fprintf(stderr, "receiver %s disconnected\n", ctx->peer);
   if (attached)
-    nd_display_state_detach(ctx->display_state, c);
+    nd_display_state_detach(ctx->display_state, &ch);
   destroy_ui(&kbm);
   destroy_ui(&tp);
   destroy_ui(&touch);
   for (unsigned i = 0; i < count; i++) {
     ndc_stop_child(&streams[i].video_pid);
     if (streams[i].lifecycle_started && cfg->disconnect_cmd[0])
-      (void)run_stream_hook(cfg, ctx->peer, &streams[i], cfg->disconnect_cmd);
+      (void)run_stream_hook(cfg, ctx->peer, &streams[i], cfg->disconnect_cmd,
+                            0);
   }
+  nd_channel_clear(&ch);
+  sodium_memzero(video_key, sizeof(video_key));
+  sodium_memzero(streams, sizeof(streams));
+  live_remove(c);
   close(c);
   atomic_fetch_sub_explicit(&session_count, 1, memory_order_relaxed);
   free(ctx);
   return NULL;
+}
+
+/* At startup, outputs named after this server's prefix belong to no session:
+ * they were left by an earlier server that exited uncleanly. */
+static void remove_stale_output(const char *name, void *opaque) {
+  const struct host_cfg *cfg = opaque;
+  if (!cfg->disconnect_cmd[0]) {
+    fprintf(stderr, "leftover output %s from an earlier run; configure "
+                    "disconnect_cmd to remove it automatically\n", name);
+    return;
+  }
+  struct server_stream st;
+  memset(&st, 0, sizeof(st));
+  snprintf(st.output, sizeof(st.output), "%s", name);
+  fprintf(stderr, "removing leftover output %s\n", name);
+  int rc = run_stream_hook(cfg, "", &st, cfg->disconnect_cmd, 1);
+  if (rc)
+    fprintf(stderr, "disconnect_cmd for leftover output %s exited %d\n", name,
+            rc);
+}
+
+/* A restarted Hyprland has a new instance signature. Until the session
+ * exports it again, the service manager still hands out the old one and
+ * every hyprctl hook fails, so refuse to start rather than reject every
+ * receiver. Hooks that do not use hyprctl are unaffected. */
+static int hyprland_environment_stale(const struct host_cfg *cfg) {
+  const char *signature = getenv("HYPRLAND_INSTANCE_SIGNATURE");
+  if (!signature || !*signature || strchr(signature, '/') ||
+      (!strstr(cfg->connect_cmd, "hyprctl") &&
+       !strstr(cfg->disconnect_cmd, "hyprctl")))
+    return 0;
+  const char *bases[] = {getenv("XDG_RUNTIME_DIR"), "/tmp"};
+  for (size_t i = 0; i < sizeof(bases) / sizeof(bases[0]); i++) {
+    struct sockaddr_un a = {.sun_family = AF_UNIX};
+    if (!bases[i] || !*bases[i])
+      continue;
+    int n = snprintf(a.sun_path, sizeof(a.sun_path), "%s/hypr/%s/.socket.sock",
+                     bases[i], signature);
+    if (n < 0 || (size_t)n >= sizeof(a.sun_path))
+      continue;
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0)
+      return 0;
+    int r = connect(s, (struct sockaddr *)&a, sizeof(a));
+    close(s);
+    if (r == 0)
+      return 0;
+  }
+  return 1;
+}
+
+static int create_worker(pthread_t *thread, void *(*fn)(void *), void *arg) {
+  /* Stop signals are handled only by the main thread. */
+  sigset_t stops, previous;
+  sigemptyset(&stops);
+  sigaddset(&stops, SIGTERM);
+  sigaddset(&stops, SIGINT);
+  sigaddset(&stops, SIGHUP);
+  pthread_sigmask(SIG_BLOCK, &stops, &previous);
+  int e = pthread_create(thread, NULL, fn, arg);
+  pthread_sigmask(SIG_SETMASK, &previous, NULL);
+  return e;
 }
 
 int main(int argc, char **argv) {
@@ -1046,15 +1217,42 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: %s SERVER_CONFIG\n", argv[0]);
     return 2;
   }
-  struct host_cfg cfg;
+  static struct host_cfg cfg;
   load_cfg(argv[1], &cfg);
-  struct nd_display_state_source display_state;
-  if (nd_display_state_start(&display_state, cfg.output, cfg.source_output,
-                             cfg.brightness_device) < 0)
-    die("start display-state watchers");
+  if (hyprland_environment_stale(&cfg)) {
+    fprintf(stderr, "HYPRLAND_INSTANCE_SIGNATURE names a Hyprland instance "
+                    "that is not running; waiting for the session to export "
+                    "the current one\n");
+    return 1;
+  }
+  if (pipe2(stop_pipe, O_CLOEXEC | O_NONBLOCK) < 0)
+    die("pipe");
+  struct sigaction stop_action = {.sa_handler = stop_signal,
+                                  .sa_flags = SA_RESTART};
+  sigemptyset(&stop_action.sa_mask);
+  sigaction(SIGTERM, &stop_action, NULL);
+  sigaction(SIGINT, &stop_action, NULL);
+  sigaction(SIGHUP, &stop_action, NULL);
+  sigset_t stops, previous;
+  sigemptyset(&stops);
+  sigaddset(&stops, SIGTERM);
+  sigaddset(&stops, SIGINT);
+  sigaddset(&stops, SIGHUP);
+  pthread_sigmask(SIG_BLOCK, &stops, &previous);
+  /* Bind first: a second server on the same port must fail before it
+   * mistakes the running server's outputs for leftovers. */
   int ls = make_listener(&cfg);
+  static struct nd_display_state_source display_state;
+  if (nd_display_state_start(&display_state, cfg.output, cfg.source_output,
+                             cfg.brightness_device, remove_stale_output,
+                             compositor_lost, &cfg) < 0) {
+    fprintf(stderr, "cannot start display-state watchers: %s\n",
+            strerror(errno));
+    return 1;
+  }
+  pthread_sigmask(SIG_SETMASK, &previous, NULL);
   pthread_t discovery_thread;
-  int de = pthread_create(&discovery_thread, NULL, discovery_main, &cfg);
+  int de = create_worker(&discovery_thread, discovery_main, &cfg);
   if (de != 0) {
     errno = de;
     die("pthread_create discovery");
@@ -1070,12 +1268,29 @@ int main(int argc, char **argv) {
           : cfg.frame_encryption == 1 ? "allowed"
                                       : "off");
 
-  for (;;) {
+  int stop_status = -1;
+  while (stop_status < 0) {
+    struct pollfd fds[2] = {{.fd = ls, .events = POLLIN},
+                            {.fd = stop_pipe[0], .events = POLLIN}};
+    if (poll(fds, 2, -1) < 0) {
+      if (errno == EINTR)
+        continue;
+      die("poll");
+    }
+    if (fds[1].revents) {
+      uint8_t b;
+      while (read(stop_pipe[0], &b, 1) == 1)
+        if (b > stop_status)
+          stop_status = b;
+      continue;
+    }
+    if (!fds[0].revents)
+      continue;
     struct sockaddr_in pa;
     socklen_t plen = sizeof(pa);
     int c = accept4(ls, (struct sockaddr *)&pa, &plen, SOCK_CLOEXEC);
     if (c < 0) {
-      if (errno == EINTR)
+      if (errno == EINTR || errno == ECONNABORTED || errno == EAGAIN)
         continue;
       die("accept");
     }
@@ -1091,7 +1306,8 @@ int main(int argc, char **argv) {
     }
     ndc_set_tcp_opts(c);
     struct session_ctx *ctx = calloc(1, sizeof(*ctx));
-    if (!ctx) {
+    if (!ctx || live_add(c) < 0) {
+      free(ctx);
       atomic_fetch_sub_explicit(&session_count, 1, memory_order_relaxed);
       close(c);
       continue;
@@ -1103,13 +1319,18 @@ int main(int argc, char **argv) {
                                             memory_order_relaxed);
     snprintf(ctx->peer, sizeof(ctx->peer), "%s", peer);
     pthread_t thread;
-    int e = pthread_create(&thread, NULL, session_main, ctx);
+    int e = create_worker(&thread, session_main, ctx);
     if (e) {
       free(ctx);
+      live_remove(c);
       close(c);
       atomic_fetch_sub_explicit(&session_count, 1, memory_order_relaxed);
       continue;
     }
     pthread_detach(thread);
   }
+  close(ls);
+  fprintf(stderr, "netdisplay-server stopping\n");
+  live_stop(20);
+  return stop_status;
 }

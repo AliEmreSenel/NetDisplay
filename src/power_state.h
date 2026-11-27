@@ -26,7 +26,8 @@ struct nd_power_rx {
 
 uint64_t nd_power_now_ms(void);
 int nd_power_read(const char *root, struct nd_power_snapshot *snapshot);
-int nd_power_send(int fd, const struct nd_power_snapshot *snapshot);
+struct nd_channel;
+int nd_power_send(struct nd_channel *ch, const struct nd_power_snapshot *snapshot);
 /* 1: complete snapshot in *complete (caller frees), 0: pending, -1: invalid. */
 int nd_power_receive(struct nd_power_rx *rx, uint16_t type, const void *data,
                      uint32_t length, struct nd_power_snapshot **complete);

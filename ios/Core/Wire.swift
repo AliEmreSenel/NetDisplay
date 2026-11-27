@@ -53,14 +53,15 @@ struct ControlMessage {
         w.u16(type); w.u32(UInt32(payload.count)); w.data.append(payload)
         return w.data
     }
-    static func decodeHeader(_ header: Data) throws -> (type: UInt16, count: Int) {
+    /// Sealed messages carry NDProtocol.sealOverhead extra bytes; pass maxWire for them.
+    static func decodeHeader(_ header: Data, limit: Int = NDProtocol.maxPayload) throws -> (type: UInt16, count: Int) {
         guard header.count == 12 else { throw NDError.message("Invalid control header length") }
         var r = ByteReader(header)
         guard try r.u32() == magic else { throw NDError.message("Not a NetDisplay server") }
         let v = try r.u16()
-        guard v == version else { throw NDError.message("Server protocol v\(v); this app requires NetDisplay v6") }
+        guard v == version else { throw NDError.message("Server protocol v\(v); this app requires NetDisplay v\(version)") }
         let t = try r.u16(), n = try r.u32()
-        guard n <= UInt32(NDProtocol.maxPayload) else { throw NDError.message("Oversized control message") }
+        guard n <= UInt32(limit) else { throw NDError.message("Oversized control message") }
         return (t, Int(n))
     }
     func require(_ expected: ControlType, size: Int) throws {

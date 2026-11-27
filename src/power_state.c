@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "power_state.h"
 #include "common.h"
+#include "session.h"
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -143,25 +144,25 @@ const char *nd_power_get(const struct nd_power_device *device,
   return NULL;
 }
 
-int nd_power_send(int fd, const struct nd_power_snapshot *snapshot) {
+int nd_power_send(struct nd_channel *ch, const struct nd_power_snapshot *snapshot) {
   uint32_t count = htonl(snapshot->count);
-  if (ndc_send_msg(fd, NDC_POWER_BEGIN, &count, sizeof(count)) < 0)
+  if (ndc_send_msg(ch, NDC_POWER_BEGIN, &count, sizeof(count)) < 0)
     return -1;
   for (uint32_t i = 0; i < snapshot->count; i++) {
     const struct nd_power_device *d = &snapshot->devices[i];
     struct power_device_wire wire = {.id = htons((uint16_t)i),
                                      .count = htons((uint16_t)d->count)};
     memcpy(wire.name, d->name, sizeof(wire.name));
-    if (ndc_send_msg(fd, NDC_POWER_DEVICE, &wire, sizeof(wire)) < 0)
+    if (ndc_send_msg(ch, NDC_POWER_DEVICE, &wire, sizeof(wire)) < 0)
       return -1;
     for (uint32_t j = 0; j < d->count; j++) {
       struct power_property_wire p = {.id = htons((uint16_t)i),
                                       .property = d->properties[j]};
-      if (ndc_send_msg(fd, NDC_POWER_PROPERTY, &p, sizeof(p)) < 0)
+      if (ndc_send_msg(ch, NDC_POWER_PROPERTY, &p, sizeof(p)) < 0)
         return -1;
     }
   }
-  return ndc_send_msg(fd, NDC_POWER_END, NULL, 0);
+  return ndc_send_msg(ch, NDC_POWER_END, NULL, 0);
 }
 
 void nd_power_rx_clear(struct nd_power_rx *rx) {

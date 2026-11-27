@@ -25,17 +25,21 @@ struct nd_input_terminal {
 int nd_input_terminal_enter(struct nd_input_terminal *terminal, int fd);
 void nd_input_terminal_restore(struct nd_input_terminal *terminal);
 
+struct nd_channel;
 struct nd_input_context {
   pthread_mutex_t send_mutex;
   pthread_cond_t changed;
   pthread_t thread, owner;
   _Atomic int running, quit;
-  int sock, forward, grab, prompting, paused, started;
+  /* Sends are made with send_mutex held; NULL when no session is active. */
+  struct nd_channel *channel;
+  int forward, grab, prompting, paused, started;
   unsigned generation;
   struct nd_input_terminal terminal;
 };
 int nd_input_start(struct nd_input_context *ctx, int grab);
-void nd_input_session(struct nd_input_context *ctx, int fd, int forward);
+void nd_input_session(struct nd_input_context *ctx, struct nd_channel *channel,
+                      int forward);
 void nd_input_prompt(struct nd_input_context *ctx, int prompting);
 void nd_input_stop(struct nd_input_context *ctx);
 #endif

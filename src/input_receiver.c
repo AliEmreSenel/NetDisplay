@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "input_receiver.h"
 #include "common.h"
+#include "session.h"
 #include <glob.h>
 #include <poll.h>
 #include <sys/ioctl.h>
@@ -232,16 +233,16 @@ void nd_input_terminal_restore(struct nd_input_terminal *terminal) {
 /* Caller holds send_mutex; session detachment cannot race fd reuse. */
 static int send_input(struct nd_input_context *ctx, uint8_t dev, uint16_t type,
                       uint16_t code, int value) {
-  if (!ctx->forward || ctx->sock < 0)
+  if (!ctx->forward || !ctx->channel)
     return 0;
   struct ndc_input w = {.device = dev,
                         .type = htons(type),
                         .code = htons(code),
                         .value = (int32_t)htonl((uint32_t)value)};
-  int r = ndc_send_msg(ctx->sock, NDC_INPUT, &w, sizeof(w));
+  int r = ndc_send_msg(ctx->channel, NDC_INPUT, &w, sizeof(w));
   if (r < 0) {
     ctx->forward = 0;
-    shutdown(ctx->sock, SHUT_RDWR);
+    shutdown(ctx->channel->fd, SHUT_RDWR);
   }
   return r;
 }
@@ -439,8 +440,8 @@ static void *input_main(void *opaque) {
   for (int i = 0; i < MAX_INPUT_DEVS; i++)
     if (devs[i].fd >= 0)
       remove_input(ctx, &state, &devs[i]);
-  if (ctx->sock >= 0)
-    shutdown(ctx->sock, SHUT_RDWR);
+  if (ctx->channel)
+    shutdown(ctx->channel->fd, SHUT_RDWR);
   nd_input_terminal_restore(&ctx->terminal);
   ctx->paused = 1;
   atomic_store(&ctx->running, 0);
@@ -452,7 +453,7 @@ static void *input_main(void *opaque) {
 }
 int nd_input_start(struct nd_input_context *ctx, int grab) {
   memset(ctx, 0, sizeof(*ctx));
-  ctx->sock = -1;
+  ctx->channel = NULL;
   ctx->grab = grab;
   ctx->owner = pthread_self();
   ctx->terminal.fd =
@@ -475,13 +476,14 @@ int nd_input_start(struct nd_input_context *ctx, int grab) {
           "Press Escape five times consecutively to shut down the receiver.\n");
   return 0;
 }
-void nd_input_session(struct nd_input_context *ctx, int fd, int forward) {
+void nd_input_session(struct nd_input_context *ctx, struct nd_channel *channel,
+                      int forward) {
   pthread_mutex_lock(&ctx->send_mutex);
-  ctx->sock = fd;
+  ctx->channel = channel;
   ctx->forward = forward;
   ctx->generation++;
-  if (fd >= 0 && atomic_load(&ctx->quit))
-    shutdown(fd, SHUT_RDWR);
+  if (channel && atomic_load(&ctx->quit))
+    shutdown(channel->fd, SHUT_RDWR);
   pthread_mutex_unlock(&ctx->send_mutex);
 }
 void nd_input_prompt(struct nd_input_context *ctx, int prompting) {

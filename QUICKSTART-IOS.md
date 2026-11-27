@@ -1,6 +1,6 @@
 # NetDisplay on iPhone: start here
 
-Native iPhone receiver for the **protocol-v6 source in this repository**, plus head-motion streaming and a Linux stereo demonstration. Requires **iOS 17 or newer**. Designed for iPhone 14, a Lightning USB Personal Hotspot connection, and a manually calibrated phone VR viewer.
+Native iPhone receiver for the **protocol-v7 source in this repository**, plus head-motion streaming and a Linux stereo demonstration. Requires **iOS 17 or newer**. Designed for iPhone 14, a Lightning USB Personal Hotspot connection, and a manually calibrated phone VR viewer.
 
 **Build status:** the portable Swift/C/Python tests have been run. Xcode compilation, installation on a physical iPhone, USB-hotspot routing, and the Cobra optics have **not** been verified in the package-generation environment. The included GitHub workflow performs the real Apple-platform build; a successful run is the next validation gate. This ZIP contains source, not a prebuilt or signed IPA. See [validation](ios/docs/VALIDATION.md).
 
@@ -74,7 +74,7 @@ ip route
 
 Enter the **Linux computer's IPv4 address on the iPhone USB interface** in the app. Do **not** enter the iPhone's gateway address. Do not hard-code an assumed `172.20.10.x` or `192.168.x.x` subnet. Wi-Fi uses the same protocol, but the app follows the route to the IP you enter; it does not force an arbitrary connection to become USB.
 
-Start your existing v6 NetDisplay server using your normal launcher/service. In the app select matching authentication and video-encryption settings. Initial defaults are **H.264, 1280x720, 60 fps**, password authentication, and video encryption off. Enter the original password, not the server's derived `password_key` value, when using Password mode. The raw 32-byte-key mode accepts 64 hex characters.
+Start a v7 NetDisplay server (this repository) using your normal launcher/service; v6 servers are not compatible. In the app select matching authentication and video-encryption settings. Initial defaults are **H.264, 1280x720, 60 fps**, password authentication, and video encryption off. Enter the original password, not the server's derived `password_key` value, when using Password mode. The raw 32-byte-key mode accepts 64 hex characters.
 
 The server controls encryption policy: `frame_encryption=off` rejects encrypted clients; `allowed` accepts either; `required` rejects plaintext. Both ends must agree. Use encryption on shared/untrusted networks. Prefer keeping development traffic on a trusted local USB network.
 

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Exercise the real one-shot receiver and source without video devices."""
 
+import os
 from pathlib import Path
 import re
 import socket
@@ -20,6 +21,12 @@ def wait_for_source(source, port):
         except OSError:
             time.sleep(0.02)
     raise RuntimeError("Source failed to start")
+
+
+# Keep the source away from any desktop session the test runs inside.
+SOURCE_ENV = {k: v for k, v in os.environ.items()
+              if k not in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET",
+                           "HYPRLAND_INSTANCE_SIGNATURE")}
 
 
 def main(source_binary, receiver_binary):
@@ -63,6 +70,7 @@ def main(source_binary, receiver_binary):
             source = subprocess.Popen(
                 [source_binary, str(server_config)],
                 stdout=source_log, stderr=subprocess.STDOUT, text=True,
+                env=SOURCE_ENV,
             )
             try:
                 wait_for_source(source, port)
@@ -91,7 +99,8 @@ def main(source_binary, receiver_binary):
                 raise
             finally:
                 source.terminate()
-                source.wait(timeout=5)
+                status = source.wait(timeout=5)
+            assert status == 0, f"source exited {status} on SIGTERM"
     print("One authenticated, encrypted link test completed using ephemeral ports and no displays")
 
 

@@ -18,7 +18,7 @@
 #include <net/if.h>
 #include <poll.h>
 #include <pthread.h>
-#include <sodium/core.h>
+#include <sodium.h>
 #include <spawn.h>
 #include <stdatomic.h>
 #include <sys/ioctl.h>
@@ -48,6 +48,8 @@ struct client_cfg {
   int frame_encryption;
   char psk_file[512];
   uint8_t psk[ND_KEY_SIZE];
+  /* Salt the cached password key was derived with. */
+  uint8_t password_salt[ND_SALT_SIZE];
   int have_psk;
   struct {
     char connector[NDC_NAME_MAX];
@@ -157,7 +159,8 @@ static void load_cfg(const char *path, struct client_cfg *c, int required) {
   }
 }
 
-static int prompt_password(uint8_t key[ND_KEY_SIZE]) {
+static int prompt_password(uint8_t key[ND_KEY_SIZE],
+                           const uint8_t salt[ND_SALT_SIZE]) {
   if (!isatty(STDIN_FILENO) && access("/dev/tty", R_OK | W_OK) < 0) {
     fprintf(stderr, "server requires a password, but no controlling terminal "
                     "is available; use psk_file for unattended clients\n");
@@ -171,7 +174,7 @@ static int prompt_password(uint8_t key[ND_KEY_SIZE]) {
     errno = EACCES;
     return -1;
   }
-  int r = nd_crypto_password_key(key, password);
+  int r = nd_crypto_password_key(key, password, salt);
   explicit_bzero(password, strlen(password));
   return r;
 }
@@ -456,12 +459,13 @@ static int connect_source(const struct client_cfg *cfg, char host_ip[64],
   return fd;
 }
 
-static int authenticate_source(int fd, struct client_cfg *cfg,
+static int authenticate_source(struct nd_channel *ch, struct client_cfg *cfg,
                                struct ndc_hello *hello,
-                               struct ndc_challenge *challenge) {
+                               struct ndc_challenge *challenge,
+                               uint8_t video_key[ND_KEY_SIZE]) {
   nd_crypto_random(hello->nonce, sizeof(hello->nonce));
-  if (ndc_send_msg(fd, NDC_HELLO, hello, sizeof(*hello)) < 0 ||
-      ndc_recv_expected(fd, NDC_CHALLENGE, challenge, sizeof(*challenge)) < 0)
+  if (ndc_send_msg(ch, NDC_HELLO, hello, sizeof(*hello)) < 0 ||
+      ndc_recv_expected(ch, NDC_CHALLENGE, challenge, sizeof(*challenge)) < 0)
     return -1;
   uint32_t flags = ntohl(challenge->flags);
   int requires_auth = !!(flags & NDC_FLAG_AUTH_REQUIRED);
@@ -481,14 +485,20 @@ static int authenticate_source(int fd, struct client_cfg *cfg,
     errno = EINVAL;
     return -1;
   }
-  if (uses_password && !cfg->have_psk) {
+  /* A cached key only fits the salt it was derived with; a server that
+   * regenerated its password key sends a new one. */
+  if (uses_password &&
+      (!cfg->have_psk ||
+       sodium_memcmp(cfg->password_salt, challenge->salt, ND_SALT_SIZE))) {
     if (input.started) nd_input_prompt(&input, 1);
-    int result = atomic_load(&input.quit) ? -1 : prompt_password(cfg->psk);
+    int result = atomic_load(&input.quit) ? -1 :
+                 prompt_password(cfg->psk, challenge->salt);
     if (input.started) nd_input_prompt(&input, 0);
     if (result < 0) {
       fprintf(stderr, "password entry failed\n");
       return -1;
     }
+    memcpy(cfg->password_salt, challenge->salt, ND_SALT_SIZE);
     cfg->have_psk = prompted = 1;
   }
   int result = 0;
@@ -497,13 +507,16 @@ static int authenticate_source(int fd, struct client_cfg *cfg,
     errno = EPROTO;
     result = -1;
   } else if (cfg->have_psk) {
-    result = nd_session_client_auth(fd, cfg->psk, hello, challenge);
+    result = nd_session_client_auth(ch, cfg->psk, hello, challenge, video_key);
   }
-  if (result < 0 && prompted) {
+  /* Forget a rejected password, but keep it across network failures. */
+  if (result < 0 && uses_password && (prompted || errno == EACCES)) {
+    int error = errno;
     explicit_bzero(cfg->psk, sizeof(cfg->psk));
     cfg->have_psk = 0;
-    if (input.started)
+    if (input.started && error == EACCES)
       fprintf(stderr, "authentication failed; password will be requested again\n");
+    errno = error;
   }
   return result;
 }
@@ -517,6 +530,9 @@ static int run_network_test(struct client_cfg *cfg) {
   }
 
   int result = 1;
+  struct nd_channel ch;
+  uint8_t video_key[ND_KEY_SIZE] = {0};
+  nd_channel_init(&ch, fd);
   struct timeval timeout = {.tv_sec = 10};
   if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
     perror("set network speed test timeout");
@@ -529,21 +545,23 @@ static int run_network_test(struct client_cfg *cfg) {
   };
   struct ndc_challenge challenge;
   struct ndc_welcome welcome;
-  if (authenticate_source(fd, cfg, &hello, &challenge) < 0 ||
-      ndc_recv_expected(fd, NDC_WELCOME, &welcome, sizeof(welcome)) < 0 ||
+  if (authenticate_source(&ch, cfg, &hello, &challenge, video_key) < 0 ||
+      ndc_recv_expected(&ch, NDC_WELCOME, &welcome, sizeof(welcome)) < 0 ||
       ntohl(welcome.flags) != mode || welcome.display_count || welcome.video_codec) {
     fprintf(stderr, "source did not accept the network speed test; "
                     "check the source version and authentication settings\n");
     goto done;
   }
   fprintf(stderr, "testing network link to %s\n", host_ip);
-  if (nd_network_link_test(fd, 0, host_ip, interface, &hello, &challenge,
-                           cfg->frame_encryption ? cfg->psk : NULL) < 0) {
+  if (nd_network_link_test(&ch, 0, host_ip, interface, &challenge,
+                           cfg->frame_encryption ? video_key : NULL) < 0) {
     fprintf(stderr, "network speed test failed during UDP setup or exchange\n");
     goto done;
   }
   result = 0;
 done:
+  nd_channel_clear(&ch);
+  sodium_memzero(video_key, sizeof(video_key));
   close(fd);
   return result;
 }
@@ -1002,7 +1020,10 @@ int main(int argc, char **argv) {
     int s = connect_source(&cfg, host_ip, discovered_if);
     if (s < 0)
       goto retry;
-    nd_input_session(&input, s, 0);
+    struct nd_channel ch;
+    uint8_t video_key[ND_KEY_SIZE] = {0};
+    nd_channel_init(&ch, s);
+    nd_input_session(&input, &ch, 0);
 
     struct client_stream_runtime streams[NDC_MAX_DISPLAYS];
     memset(streams, 0, sizeof(streams));
@@ -1015,6 +1036,7 @@ int main(int argc, char **argv) {
     uint32_t decoder_caps = nd_video_decoder_caps(cfg.vaapi_device);
     if (!decoder_caps) {
       fprintf(stderr, "no usable VAAPI hardware video decoder found\n");
+      nd_input_session(&input, NULL, 0);
       close(s);
       goto retry;
     }
@@ -1028,7 +1050,8 @@ int main(int argc, char **argv) {
         .video_codecs = htonl(decoder_caps),
     };
     struct ndc_challenge challenge;
-    int session_ok = authenticate_source(s, &cfg, &hello, &challenge) == 0;
+    int session_ok =
+        authenticate_source(&ch, &cfg, &hello, &challenge, video_key) == 0;
     for (int i = 0; session_ok && i < display_count; i++) {
       struct ndc_display d = {
           .display_id = htonl((uint32_t)i + 1u),
@@ -1037,12 +1060,12 @@ int main(int argc, char **argv) {
           .refresh_hz = htons(displays[i].refresh_hz),
       };
       snprintf(d.connector, sizeof(d.connector), "%s", displays[i].connector);
-      if (ndc_send_msg(s, NDC_DISPLAY, &d, sizeof(d)) < 0)
+      if (ndc_send_msg(&ch, NDC_DISPLAY, &d, sizeof(d)) < 0)
         session_ok = 0;
     }
     struct ndc_welcome welcome;
     if (session_ok &&
-        ndc_recv_expected(s, NDC_WELCOME, &welcome, sizeof(welcome)) < 0)
+        ndc_recv_expected(&ch, NDC_WELCOME, &welcome, sizeof(welcome)) < 0)
       session_ok = 0;
     uint16_t video_codec = session_ok ? ntohs(welcome.video_codec) : 0;
     int input_allowed =
@@ -1056,7 +1079,7 @@ int main(int argc, char **argv) {
       session_ok = 0;
     for (int i = 0; session_ok && i < display_count; i++) {
       struct ndc_stream wire;
-      if (ndc_recv_expected(s, NDC_STREAM, &wire, sizeof(wire)) < 0) {
+      if (ndc_recv_expected(&ch, NDC_STREAM, &wire, sizeof(wire)) < 0) {
         session_ok = 0;
         break;
       }
@@ -1083,14 +1106,14 @@ int main(int argc, char **argv) {
       }
       uint8_t key[ND_KEY_SIZE] = {0};
       if (cfg.frame_encryption)
-        nd_crypto_stream_key(key, cfg.psk, st->stream_id, hello.nonce,
-                             challenge.nonce);
+        nd_crypto_stream_key(key, video_key, st->stream_id);
       int ready_fd = -1;
       st->pid = spawn_builtin_receiver(&cfg, master_fd, st->display, st->port,
                                        st->width, st->height, st->refresh_hz,
                                        discovered_if, cfg.frame_encryption,
                                        st->stream_id, key, video_codec,
                                        &ready_fd, &st->state_fd);
+      sodium_memzero(key, sizeof(key));
       if (st->pid < 0 || wait_receiver_ready(st->pid, ready_fd, 10000) < 0) {
         if (ready_fd >= 0)
           close(ready_fd);
@@ -1099,11 +1122,11 @@ int main(int argc, char **argv) {
       }
       close(ready_fd);
       struct ndc_stream_ready ready = {.display_id = htonl(st->display_id)};
-      if (ndc_send_msg(s, NDC_STREAM_READY, &ready, sizeof(ready)) < 0)
+      if (ndc_send_msg(&ch, NDC_STREAM_READY, &ready, sizeof(ready)) < 0)
         session_ok = 0;
     }
 
-    nd_input_session(&input, s, session_ok && input_allowed && cfg.want_input);
+    nd_input_session(&input, &ch, session_ok && input_allowed && cfg.want_input);
 
     struct nd_power_snapshot *power = NULL;
     if (session_ok && cfg.send_power && (ntohl(welcome.flags) & NDC_FLAG_POWER_INFO))
@@ -1117,7 +1140,7 @@ int main(int argc, char **argv) {
         if (nd_power_read("/sys/class/power_supply", power) == 0) {
           power_read_warned = 0;
           pthread_mutex_lock(&input.send_mutex);
-          int sent = nd_power_send(s, power);
+          int sent = nd_power_send(&ch, power);
           pthread_mutex_unlock(&input.send_mutex);
           if (sent < 0) break;
         } else if (!power_read_warned) {
@@ -1145,7 +1168,7 @@ int main(int argc, char **argv) {
         break;
       if (!pr) {
         pthread_mutex_lock(&input.send_mutex);
-        int sr = ndc_send_msg(s, NDC_PING, NULL, 0);
+        int sr = ndc_send_msg(&ch, NDC_PING, NULL, 0);
         pthread_mutex_unlock(&input.send_mutex);
         if (sr < 0)
           break;
@@ -1154,11 +1177,11 @@ int main(int argc, char **argv) {
       uint8_t b[NDC_MAX_PAYLOAD];
       uint32_t len = sizeof(b);
       uint16_t type;
-      if (ndc_recv_msg(s, &type, b, &len) <= 0)
+      if (ndc_recv_msg(&ch, &type, b, &len) <= 0)
         break;
       if (type == NDC_PING && len == 0) {
         pthread_mutex_lock(&input.send_mutex);
-        int sr = ndc_send_msg(s, NDC_PONG, NULL, 0);
+        int sr = ndc_send_msg(&ch, NDC_PONG, NULL, 0);
         pthread_mutex_unlock(&input.send_mutex);
         if (sr < 0)
           break;
@@ -1188,9 +1211,11 @@ int main(int argc, char **argv) {
         break;
     }
     free(power);
-    nd_input_session(&input, -1, 0);
+    nd_input_session(&input, NULL, 0);
     shutdown(s, SHUT_RDWR);
     close(s);
+    nd_channel_clear(&ch);
+    sodium_memzero(video_key, sizeof(video_key));
     for (int i = 0; i < display_count; i++) {
       if (streams[i].state_fd >= 0)
         close(streams[i].state_fd);

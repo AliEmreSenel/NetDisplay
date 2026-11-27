@@ -149,9 +149,16 @@ display=HDMI-A-1,2560x1440@144
 ```
 
 The default server config creates and removes Hyprland headless outputs with
-local `hyprctl` hooks. Before creating an output it removes only the exact
-session-derived name, which also cleans up stale headless outputs left after an
-unclean daemon restart. Receivers cannot send arbitrary commands.
+local `hyprctl` hooks. Receivers cannot send arbitrary commands. On `SIGTERM`
+(`systemctl --user stop` or `restart`) the server ends every session and runs
+its `disconnect_cmd` before exiting. At startup it runs `disconnect_cmd`, with
+`ND_STALE=1`, for any output that still carries its `output=` prefix, since
+only a server that crashed can have left one behind.
+
+The server exits when its Wayland compositor goes away, and refuses to start
+while `HYPRLAND_INSTANCE_SIGNATURE` names a Hyprland instance that is not
+running. The service then restarts it until the new session has exported its
+environment, instead of leaving it attached to a dead compositor.
 
 For interactive authentication, generate a key and put it in
 `password_key=` on the server:
@@ -160,10 +167,20 @@ For interactive authentication, generate a key and put it in
 netdisplay-server --derive-password-key
 ```
 
-The client prompts for the password; plaintext is never sent or stored. For an
-unattended client, put the same 32-byte PSK on both machines and configure
-`psk_file` instead. Frame encryption can then be allowed or required by the
-server.
+The output is a random per-server salt and the Argon2id key derived from it.
+Keys from older versions have no salt; they keep working, but the server warns
+until you regenerate them. The client prompts for the password; plaintext is
+never sent or stored. For an unattended client, put the same 32-byte PSK on
+both machines and configure `psk_file` instead. Frame encryption can then be
+allowed or required by the server.
+
+With a password or PSK, the two sides authenticate each other with CPace, a
+password-authenticated key exchange, so a captured or impersonated handshake
+gives an attacker nothing to test password guesses against offline. Every
+control message after the handshake, including forwarded keystrokes, is
+encrypted and authenticated with keys unique to that session. Video keys come
+from the same exchange. Without a password or PSK the control channel is
+plaintext.
 
 ## Optional features
 
@@ -198,6 +215,10 @@ testing, and removal.
 The source mirrors DPMS and normalized backlight brightness to receivers when
 the required interfaces are available. Missing DPMS or backlight support does
 not stop video.
+
+Stream statistics are logged once a minute, or every second when stderr is a
+terminal. Set `NETDISPLAY_STATS_INTERVAL` to a number of seconds to change
+that, or to 0 to turn them off.
 
 To measure the link during initial setup, run this on the receiver with the
 source running:
@@ -289,13 +310,15 @@ to build through Xcode.
 
 ## Shared streaming core
 
-Desktop and VR use the same v6 control protocol, authentication proofs,
-stream-key derivation, and fragmented UDP video format. Capability flags
+Desktop and VR use the same v7 control protocol, password-authenticated key
+exchange, sealed control channel, stream-key derivation, and fragmented UDP
+video format. Capability flags
 negotiate optional features; VR requires authenticated, encrypted video and a
 matching stereo mode. Capture, device control, rendering, and head tracking
 remain in their platform-specific components.
 
-`src/session.*` implements the native authentication exchange.
+`src/crypto.*` implements the key exchange and message sealing on every
+platform, including iOS; `src/session.*` runs them over a control socket.
 `src/encoder.*` owns hardware encoder selection and low-latency configuration.
 `src/video_tx.*` owns the bounded transmit worker: up to three dependent access
 units preserve decode order, while a newer keyframe supersedes queued work.
@@ -318,7 +341,8 @@ protocol constants, run `python3 tools/generate-wire.py` to update the checked-i
 Swift constants, then `python3 ios/scripts/generate_project.py` if adding
 sources. Tests check generated constants, mutual authentication and encryption
 policy, transmit cancellation/replacement, and real encoded video passing
-through both receiver interfaces. Wire compatibility stays at v6.
+through both receiver interfaces. Protocol v7 does not interoperate with v6:
+update the source and every receiver, including the iOS app, together.
 
 The integrated video tests compare intervals 1, 2 and 3 on a textured background
 with a moving window, inject lost keyframes/P-frames/fragments, and compare

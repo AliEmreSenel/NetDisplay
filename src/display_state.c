@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "common.h"
 #include "display_state.h"
+#include "session.h"
 
 #include <glob.h>
 #include <limits.h>
@@ -31,13 +32,19 @@ struct wayland_watch {
     struct watched_output *outputs;
 };
 
+/* NetDisplay names its outputs "<output>-<session>-<display>". */
+static int is_netdisplay_output(const struct nd_display_state_source *s,
+                                const char *name)
+{
+    size_t prefix = strlen(s->output);
+    return !strncmp(name, s->output, prefix) &&
+           (name[prefix] == 0 || name[prefix] == '-');
+}
+
 static int source_matches(const struct nd_display_state_source *s,
                           const char *name)
 {
-    if (!name || !*name) return 0;
-    size_t prefix = strlen(s->output);
-    if (!strncmp(name, s->output, prefix) &&
-        (name[prefix] == 0 || name[prefix] == '-')) return 0;
+    if (!name || !*name || is_netdisplay_output(s, name)) return 0;
     return !s->source_output[0] || !strcmp(name, s->source_output);
 }
 
@@ -50,13 +57,13 @@ static int send_state_locked(struct nd_display_state_source *s)
     };
     int result = 0;
     for (unsigned i = 0; i < s->session_count;) {
-        int fd = s->session_fds[i];
-        if (ndc_send_msg(fd, NDC_DISPLAY_STATE, &state, sizeof(state)) == 0) {
+        struct nd_channel *ch = s->sessions[i];
+        if (ndc_send_msg(ch, NDC_DISPLAY_STATE, &state, sizeof(state)) == 0) {
             i++;
             continue;
         }
-        shutdown(fd, SHUT_RDWR);
-        s->session_fds[i] = s->session_fds[--s->session_count];
+        shutdown(ch->fd, SHUT_RDWR);
+        s->sessions[i] = s->sessions[--s->session_count];
         result = -1;
     }
     return result;
@@ -140,7 +147,7 @@ static void output_name(void *data, struct wl_output *output, const char *name)
     struct watched_output *out = data;
     snprintf(out->name, sizeof(out->name), "%s", name);
     if (!out->state->source_output[0] &&
-        strcmp(out->name, out->state->output)) {
+        !is_netdisplay_output(out->state, out->name)) {
         snprintf(out->state->source_output,
                  sizeof(out->state->source_output), "%s", out->name);
         fprintf(stderr, "host display-state source: %s\n", out->name);
@@ -222,25 +229,69 @@ static const struct wl_registry_listener registry_listener = {
 
 static void *wayland_thread(void *opaque)
 {
-    struct nd_display_state_source *state = opaque;
-    struct wayland_watch w = { .state = state };
-    w.display = wl_display_connect(NULL);
-    if (!w.display) {
-        fprintf(stderr, "DPMS sync unavailable: cannot connect to Wayland\n");
-        return NULL;
-    }
-    w.registry = wl_display_get_registry(w.display);
-    wl_registry_add_listener(w.registry, &registry_listener, &w);
-    if (wl_display_roundtrip(w.display) < 0 ||
-        wl_display_roundtrip(w.display) < 0 || !w.manager) {
-        fprintf(stderr, "DPMS sync unavailable: compositor has no wlr-output-power-management-v1\n");
-        wl_display_disconnect(w.display);
-        return NULL;
-    }
-    while (wl_display_dispatch(w.display) >= 0) {}
-    fprintf(stderr, "DPMS sync stopped: Wayland connection closed\n");
-    wl_display_disconnect(w.display);
+    struct wayland_watch *w = opaque;
+    while (wl_display_dispatch(w->display) >= 0) {}
+    fprintf(stderr, "Wayland connection lost: %s\n", strerror(errno));
+    if (w->state->compositor_lost)
+        w->state->compositor_lost(w->state->opaque);
     return NULL;
+}
+
+/* Connects and reads the initial globals on the calling thread, so the
+ * caller learns synchronously whether the compositor is reachable. */
+static int wayland_start(struct nd_display_state_source *state,
+                         void (*stale_output)(const char *, void *))
+{
+    int required = getenv("WAYLAND_DISPLAY") || getenv("WAYLAND_SOCKET");
+    struct wayland_watch *w = calloc(1, sizeof(*w));
+    if (!w) return -1;
+    w->state = state;
+    w->display = wl_display_connect(NULL);
+    if (!w->display) {
+        int error = errno;
+        free(w);
+        if (!required) {
+            fprintf(stderr, "no Wayland session: DPMS sync and leftover-output "
+                            "cleanup are disabled\n");
+            return 0;
+        }
+        fprintf(stderr, "cannot connect to the Wayland compositor: %s\n",
+                strerror(error));
+        errno = error ? error : ECONNREFUSED;
+        return -1;
+    }
+    w->registry = wl_display_get_registry(w->display);
+    wl_registry_add_listener(w->registry, &registry_listener, w);
+    if (wl_display_roundtrip(w->display) < 0 ||
+        wl_display_roundtrip(w->display) < 0) {
+        int error = errno;
+        fprintf(stderr, "Wayland compositor stopped responding: %s\n",
+                strerror(error));
+        wl_display_disconnect(w->display);
+        free(w);
+        errno = error ? error : EPIPE;
+        return required ? -1 : 0;
+    }
+    if (!w->manager)
+        fprintf(stderr, "DPMS sync unavailable: compositor has no "
+                        "wlr-output-power-management-v1\n");
+    if (stale_output)
+        for (struct watched_output *o = w->outputs; o; o = o->next)
+            if (o->name[0] && is_netdisplay_output(state, o->name))
+                stale_output(o->name, state->opaque);
+    /* Keep dispatching without DPMS support too: losing the connection is
+     * how a restarted or crashed compositor is noticed. */
+    pthread_t thread;
+    int e = pthread_create(&thread, NULL, wayland_thread, w);
+    if (e) {
+        wl_display_disconnect(w->display);
+        free(w);
+        errno = e;
+        return -1;
+    }
+    pthread_detach(thread);
+    state->wayland = w;
+    return 0;
 }
 
 static int read_uint_file(const char *path, unsigned long *value)
@@ -287,9 +338,18 @@ static void *brightness_thread(void *opaque)
 
     int ino = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
     if (ino >= 0) {
-        (void)inotify_add_watch(ino, current, IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB);
-        (void)inotify_add_watch(ino, actual, IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB);
+        uint32_t mask = IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB;
+        int watched = (inotify_add_watch(ino, current, mask) >= 0) +
+                      (inotify_add_watch(ino, actual, mask) >= 0);
+        if (!watched) {
+            close(ino);
+            ino = -1;
+        }
     }
+    /* inotify sees sysfs writes and the backlight class's change
+     * notifications. The slow re-read only covers drivers that change the
+     * level without notifying, so idle hosts are not woken constantly. */
+    int interval_ms = ino >= 0 ? 5000 : 500;
     uint32_t last = UINT32_MAX;
     for (;;) {
         unsigned long value;
@@ -303,10 +363,10 @@ static void *brightness_thread(void *opaque)
                 publish_brightness(state, last);
             }
         }
-        if (ino < 0) { usleep(100000); continue; }
+        if (ino < 0) { usleep((useconds_t)interval_ms * 1000u); continue; }
         struct pollfd p = { .fd = ino, .events = POLLIN };
         int pr;
-        do { pr = poll(&p, 1, 100); } while (pr < 0 && errno == EINTR);
+        do { pr = poll(&p, 1, interval_ms); } while (pr < 0 && errno == EINTR);
         if (pr > 0) {
             char events[1024];
             while (read(ino, events, sizeof(events)) > 0) {}
@@ -316,58 +376,63 @@ static void *brightness_thread(void *opaque)
 
 int nd_display_state_start(struct nd_display_state_source *s,
                            const char *output, const char *source_output,
-                           const char *brightness_device)
+                           const char *brightness_device,
+                           void (*stale_output)(const char *name, void *opaque),
+                           void (*compositor_lost)(void *opaque), void *opaque)
 {
     memset(s, 0, sizeof(*s));
     s->mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
     s->session_count = 0;
+    s->compositor_lost = compositor_lost;
+    s->opaque = opaque;
     snprintf(s->output, sizeof(s->output), "%s", output);
     snprintf(s->source_output, sizeof(s->source_output), "%s", source_output);
     snprintf(s->brightness_device, sizeof(s->brightness_device), "%s",
              brightness_device);
-    pthread_t power, brightness;
-    int e = pthread_create(&power, NULL, wayland_thread, s);
-    if (e) { errno = e; return -1; }
-    pthread_detach(power);
-    e = pthread_create(&brightness, NULL, brightness_thread, s);
+    if (wayland_start(s, stale_output) < 0) return -1;
+    pthread_t brightness;
+    int e = pthread_create(&brightness, NULL, brightness_thread, s);
     if (e) { errno = e; return -1; }
     pthread_detach(brightness);
     return 0;
 }
 
-int nd_display_state_attach(struct nd_display_state_source *s, int fd)
+int nd_display_state_attach(struct nd_display_state_source *s,
+                            struct nd_channel *ch)
 {
     pthread_mutex_lock(&s->mutex);
-    if (s->session_count >= sizeof(s->session_fds) / sizeof(s->session_fds[0])) {
+    if (s->session_count >= sizeof(s->sessions) / sizeof(s->sessions[0])) {
         pthread_mutex_unlock(&s->mutex);
         errno = ENOSPC;
         return -1;
     }
-    s->session_fds[s->session_count++] = fd;
+    s->sessions[s->session_count++] = ch;
     int rc = send_state_locked(s);
     pthread_mutex_unlock(&s->mutex);
     return rc;
 }
 
-void nd_display_state_detach(struct nd_display_state_source *s, int fd)
+void nd_display_state_detach(struct nd_display_state_source *s,
+                             struct nd_channel *ch)
 {
     pthread_mutex_lock(&s->mutex);
     for (unsigned i = 0; i < s->session_count; i++) {
-        if (s->session_fds[i] != fd) continue;
-        s->session_fds[i] = s->session_fds[--s->session_count];
+        if (s->sessions[i] != ch) continue;
+        s->sessions[i] = s->sessions[--s->session_count];
         break;
     }
     pthread_mutex_unlock(&s->mutex);
 }
 
-int nd_display_state_send(struct nd_display_state_source *s, int fd,
-                          uint16_t type, const void *payload, uint32_t len)
+int nd_display_state_send(struct nd_display_state_source *s,
+                          struct nd_channel *ch, uint16_t type,
+                          const void *payload, uint32_t len)
 {
     pthread_mutex_lock(&s->mutex);
     int found = 0;
     for (unsigned i = 0; i < s->session_count; i++)
-        if (s->session_fds[i] == fd) { found = 1; break; }
-    int rc = found ? ndc_send_msg(fd, type, payload, len) : -1;
+        if (s->sessions[i] == ch) { found = 1; break; }
+    int rc = found ? ndc_send_msg(ch, type, payload, len) : -1;
     pthread_mutex_unlock(&s->mutex);
     return rc;
 }

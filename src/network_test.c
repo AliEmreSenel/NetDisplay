@@ -3,6 +3,7 @@
 #include "common.h"
 #include "frame_transport.h"
 #include "network_test.h"
+#include "session.h"
 #include <netinet/ip.h>
 #include <poll.h>
 #include <sodium.h>
@@ -21,29 +22,32 @@ struct sample {
   int acknowledged;
 };
 struct probe {
-  int fd, control, fps;
+  int fd, fps;
+  struct nd_channel *control;
   uint64_t session;
   uint8_t keys[4][ND_KEY_SIZE];
   int encrypted;
   uint8_t *data, *scratch, *receive, *latest;
 };
 
-static int recv_message(int fd, uint16_t *type, void *payload, uint32_t *size) {
+static int recv_message(struct nd_channel *ch, uint16_t *type, void *payload,
+                        uint32_t *size) {
   /* Bound partial TCP messages as well as an entirely silent peer. */
   struct timeval previous, timeout = {.tv_sec = 10};
   socklen_t n = sizeof(previous);
-  if (getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &previous, &n) < 0) return -1;
-  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
+  if (getsockopt(ch->fd, SOL_SOCKET, SO_RCVTIMEO, &previous, &n) < 0) return -1;
+  if (setsockopt(ch->fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
     return -1;
-  int r = ndc_recv_msg(fd, type, payload, size);
-  (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &previous, sizeof(previous));
+  int r = ndc_recv_msg(ch, type, payload, size);
+  (void)setsockopt(ch->fd, SOL_SOCKET, SO_RCVTIMEO, &previous, sizeof(previous));
   return r > 0 ? 0 : -1;
 }
 
-static int recv_control(int fd, uint16_t expected, void *payload, uint32_t size) {
+static int recv_control(struct nd_channel *ch, uint16_t expected, void *payload,
+                        uint32_t size) {
   uint16_t type;
   uint32_t length = size;
-  return recv_message(fd, &type, payload, &length) == 0 &&
+  return recv_message(ch, &type, payload, &length) == 0 &&
          type == expected && length == size ? 0 : -1;
 }
 
@@ -117,7 +121,7 @@ static int send_probe(struct probe *p, unsigned direction) {
         if (assembly.complete_ns > last_ack) last_ack = assembly.complete_ns;
       }
       struct pollfd fds[2] = {{.fd = p->fd, .events = POLLIN},
-                             {.fd = p->control, .events = POLLIN}};
+                             {.fd = p->control->fd, .events = POLLIN}};
       int r = poll(fds, 2, 1);
       if ((r < 0 && errno != EINTR) || fds[1].revents) return -1;
     }
@@ -205,7 +209,7 @@ static int hash_probe(struct probe *p, unsigned direction) {
   uint64_t deadline = nd_now_ns() + 10000000000ull;
   int result = -1;
   while (nd_now_ns() < deadline) {
-    struct pollfd control = {.fd = p->control, .events = POLLIN};
+    struct pollfd control = {.fd = p->control->fd, .events = POLLIN};
     int r = poll(&control, 1, 1);
     if (r < 0 && errno == EINTR) continue;
     if (r < 0) break;
@@ -261,7 +265,7 @@ static int hash_probe(struct probe *p, unsigned direction) {
   return result;
 }
 
-int nd_network_test(int control, int server, const char *peer, int video_port,
+int nd_network_test(struct nd_channel *control, int server, const char *peer, int video_port,
                      const char *interface_name, int fps, uint64_t session,
                      const uint8_t *key) {
   struct probe p = {.fd = -1, .control = control, .session = session,
@@ -291,7 +295,7 @@ int nd_network_test(int control, int server, const char *peer, int video_port,
       .sin_addr.s_addr = htonl(INADDR_ANY)};
   socklen_t length = sizeof(local);
   if (!video_port) {
-    if (getsockname(control, (struct sockaddr *)&local, &length) < 0 ||
+    if (getsockname(control->fd, (struct sockaddr *)&local, &length) < 0 ||
         local.sin_family != AF_INET)
       goto done;
     local.sin_port = 0;
@@ -346,19 +350,20 @@ done:
   return result;
 }
 
-int nd_network_link_test(int control, int server, const char *peer,
-                         const char *interface_name, const struct ndc_hello *hello,
-                         const struct ndc_challenge *challenge, const uint8_t *psk) {
+int nd_network_link_test(struct nd_channel *control, int server,
+                         const char *peer, const char *interface_name,
+                         const struct ndc_challenge *challenge,
+                         const uint8_t *video_key) {
   /* Use the fresh server nonce to identify this display-independent test. */
   uint64_t wire_session;
   memcpy(&wire_session, challenge->nonce, sizeof(wire_session));
   uint64_t session = nd_ntoh64(wire_session);
   if (!session) session = 1;
   uint8_t key[ND_KEY_SIZE] = {0};
-  if (psk)
-    nd_crypto_stream_key(key, psk, session, hello->nonce, challenge->nonce);
+  if (video_key)
+    nd_crypto_stream_key(key, video_key, session);
   int result = nd_network_test(control, server, peer, 0, interface_name,
-                               ND_DEFAULT_FPS, session, psk ? key : NULL);
+                               ND_DEFAULT_FPS, session, video_key ? key : NULL);
   sodium_memzero(key, sizeof(key));
   return result;
 }
