@@ -176,10 +176,12 @@ fi
 if [ "$ENABLE" -eq 1 ]; then
     systemctl --user daemon-reload
     if [ "$MODE" = all ] || [ "$MODE" = server ]; then
-        systemctl --user enable --now netdisplay-server.service
+        systemctl --user reenable netdisplay-server.service
+        systemctl --user start netdisplay-server.service
     fi
     if [ "$MODE" = all ] || [ "$MODE" = client ]; then
-        systemctl --user enable --now netdisplay-client.service
+        systemctl --user reenable netdisplay-client.service
+        systemctl --user start netdisplay-client.service
     fi
 fi
 printf '\nInstalled NetDisplay under %s\n' "$PREFIX"
