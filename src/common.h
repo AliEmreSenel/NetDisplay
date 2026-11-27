@@ -74,27 +74,29 @@ static inline int ndc_write_full(int fd, const void *buf, size_t len) {
   return 0;
 }
 
-static inline int ndc_send_msg(int fd, uint16_t type, const void *payload,
-                               uint32_t len) {
+/* Unsealed framing. Sessions use ndc_send_msg/ndc_recv_msg from session.h,
+ * which seal every message once the handshake has authenticated a key. */
+static inline int ndc_send_plain(int fd, uint16_t type, const void *payload,
+                                 uint32_t len) {
   if (len > NDC_MAX_PAYLOAD) {
     errno = EMSGSIZE;
     return -1;
   }
+  uint8_t b[sizeof(struct ndc_hdr) + NDC_MAX_PAYLOAD];
   struct ndc_hdr h = {
       .magic = htonl(NDC_MAGIC),
       .version = htons(NDC_VERSION),
       .type = htons(type),
       .length = htonl(len),
   };
-  if (ndc_write_full(fd, &h, sizeof(h)) < 0)
-    return -1;
-  if (len && ndc_write_full(fd, payload, len) < 0)
-    return -1;
-  return 0;
+  memcpy(b, &h, sizeof(h));
+  if (len)
+    memcpy(b + sizeof(h), payload, len);
+  return ndc_write_full(fd, b, sizeof(h) + len);
 }
 
-static inline int ndc_recv_msg(int fd, uint16_t *type, void *payload,
-                               uint32_t *len_io) {
+static inline int ndc_recv_plain(int fd, uint16_t *type, void *payload,
+                                 uint32_t *len_io) {
   struct ndc_hdr h;
   int r = ndc_read_full(fd, &h, sizeof(h));
   if (r <= 0)
@@ -113,6 +115,20 @@ static inline int ndc_recv_msg(int fd, uint16_t *type, void *payload,
   if (len)
     return ndc_read_full(fd, payload, len);
   return 1;
+}
+
+/* Seconds between periodic stream statistics: every second on a terminal,
+ * every minute otherwise so a long stream does not flood the journal.
+ * NETDISPLAY_STATS_INTERVAL overrides it; 0 disables the lines. */
+static inline double nd_stats_interval(void) {
+  const char *value = getenv("NETDISPLAY_STATS_INTERVAL");
+  if (value && *value) {
+    char *end;
+    double seconds = strtod(value, &end);
+    if (!*end && seconds >= 0)
+      return seconds;
+  }
+  return isatty(STDERR_FILENO) ? 1.0 : 60.0;
 }
 
 static inline void ndc_set_tcp_opts(int fd) {

@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "common.h"
 #include "network_test.h"
+#include "session.h"
 #include <sodium.h>
 
 int main(void) {
@@ -25,13 +26,17 @@ int main(void) {
     if (child < 0) return 3;
     if (!child) {
       close(control[0]);
-      int r = nd_network_test(control[1], 1, "127.0.0.1", ntohs(address.sin_port),
+      struct nd_channel ch;
+      nd_channel_init(&ch, control[1]);
+      int r = nd_network_test(&ch, 1, "127.0.0.1", ntohs(address.sin_port),
                               NULL, 60, 123, encrypted ? key : NULL);
       close(control[1]);
       _exit(r ? 4 : 0);
     }
     close(control[1]);
-    int r = nd_network_test(control[0], 0, "127.0.0.1", ntohs(address.sin_port),
+    struct nd_channel ch;
+    nd_channel_init(&ch, control[0]);
+    int r = nd_network_test(&ch, 0, "127.0.0.1", ntohs(address.sin_port),
                             NULL, 60, 123, encrypted ? key : NULL);
     close(control[0]);
     int status;

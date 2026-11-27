@@ -1,5 +1,7 @@
 /build/
 /DerivedData/
+# xtool's xcodebuild writes its products beside the project.
+/xtool/
 **/xcuserdata/
 *.xcuserstate
 __pycache__/

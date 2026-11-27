@@ -35,6 +35,7 @@
 
 struct output {
   struct wl_output *wl;
+  uint32_t global_name;
   char name[128];
   struct output *next;
 };
@@ -80,6 +81,9 @@ static struct nd_video_tx *tx;
 static unsigned long long stat_capture;
 static unsigned long long stat_encoded;
 static struct timespec stat_last;
+static double stat_interval;
+static unsigned capture_failures;
+static struct timespec first_capture_failure;
 
 static void ff_die(const char *what, int err) {
   char buf[AV_ERROR_MAX_STRING_SIZE];
@@ -164,6 +168,7 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name,
     if (!out)
       die("calloc output");
     out->wl = wl_registry_bind(reg, name, &wl_output_interface, 4);
+    out->global_name = name;
     wl_output_add_listener(out->wl, &output_listener, out);
     out->next = outputs;
     outputs = out;
@@ -174,7 +179,12 @@ static void registry_remove(void *data, struct wl_registry *reg,
                             uint32_t name) {
   (void)data;
   (void)reg;
-  (void)name;
+  if (target && target->global_name == name) {
+    /* Capturing a destroyed output can only fail; end the stream so the
+     * session reports it instead of retrying forever. */
+    fprintf(stderr, "output %s was removed; stopping stream\n", target->name);
+    exit(EXIT_FAILURE);
+  }
 }
 
 static const struct wl_registry_listener registry_listener = {
@@ -345,7 +355,7 @@ static void print_stats(void) {
   }
   double dt = (double)(now.tv_sec - stat_last.tv_sec) +
               (double)(now.tv_nsec - stat_last.tv_nsec) / 1e9;
-  if (dt < 1.0)
+  if (!stat_interval || dt < stat_interval)
     return;
 
   static unsigned long long lc, le, lb, lt, lr, la, lg, lerr, lo;
@@ -357,10 +367,10 @@ static void print_stats(void) {
   fprintf(
       stderr,
       "capture %.1f  encoded %.1f  tx %.1f Mbit/s  complete %.1f  latest-drop "
-      "%llu  tx-abort %llu  eagain %llu  err %llu  oversize %llu\n",
+      "%llu  tx-abort %llu  eagain %llu  err %llu  oversize %llu (last %.0f s)\n",
       (stat_capture - lc) / dt, (stat_encoded - le) / dt,
       (b - lb) * 8.0 / dt / 1e6, (t - lt) / dt, r - lr, a - la, g - lg,
-      er - lerr, o - lo);
+      er - lerr, o - lo, dt);
 
   lc = stat_capture;
   le = stat_encoded;
@@ -463,6 +473,11 @@ static void frame_ready(void *data, struct zwlr_screencopy_frame_v1 *frame,
   (void)nsec;
   zwlr_screencopy_frame_v1_destroy(frame);
   stat_capture++;
+  if (capture_failures) {
+    fprintf(stderr, "screencopy recovered after %u failed attempts\n",
+            capture_failures);
+    capture_failures = 0;
+  }
 
   if (encode_and_publish(frame_y_invert) < 0)
     encoder.frames_since_keyframe = encoder.keyframe_interval;
@@ -476,8 +491,23 @@ static void frame_ready(void *data, struct zwlr_screencopy_frame_v1 *frame,
 
 static void frame_failed(void *data, struct zwlr_screencopy_frame_v1 *frame) {
   (void)data;
-  fprintf(stderr, "screencopy failed; retrying\n");
   zwlr_screencopy_frame_v1_destroy(frame);
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  if (!capture_failures++) {
+    first_capture_failure = now;
+    fprintf(stderr, "screencopy failed; retrying\n");
+  }
+  double failing = (double)(now.tv_sec - first_capture_failure.tv_sec) +
+                   (double)(now.tv_nsec - first_capture_failure.tv_nsec) / 1e9;
+  if (failing >= 5.0) {
+    fprintf(stderr, "screencopy failed %u times in %.0f s; stopping stream\n",
+            capture_failures, failing);
+    exit(EXIT_FAILURE);
+  }
+  /* Back off so an output that cannot be captured does not spin the CPU. */
+  unsigned shift = capture_failures < 6 ? capture_failures : 6;
+  usleep(1000u << shift);
   request_frame();
 }
 
@@ -575,6 +605,7 @@ int nd_video_sender_run(const char *output_name, const char *ip, int port,
     return 2;
   }
   encoder_rate = *rate;
+  stat_interval = nd_stats_interval();
   encoder.keyframe_interval = keyframe_interval;
   selected_codec = video_codec;
   snprintf(selected_encoder, sizeof(selected_encoder), "%s", encoder_name);

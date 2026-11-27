@@ -10,8 +10,8 @@ Start with [the repository quickstart](../QUICKSTART-IOS.md). Read [validation](
 
 | Area | Implementation |
 |---|---|
-| Control | NetDisplay v6 HELLO/CHALLENGE/AUTH/DISPLAY/WELCOME/STREAM/READY, heartbeat, strict lengths and version checks |
-| Authentication | Existing repository password-derived key and PSK proof functions; mutual server/client proof |
+| Control | NetDisplay v7 HELLO/CHALLENGE/AUTH/DISPLAY/WELCOME/STREAM/READY, heartbeat, strict lengths and version checks; every message after authentication is sealed |
+| Authentication | Shared C CPace key exchange (password or PSK) with mutual key confirmation; the password salt comes from the server |
 | Video protection | Optional original XChaCha20-Poly1305 frame encryption, no silent downgrade |
 | Video network | Manual IPv4; UDP bound to the iPhone address used by TCP; validates remote IP/session/fragment sizes |
 | Decoding | H.264 first; optional hardware HEVC, no AV1 advertisement; Annex-B conversion to VideoToolbox samples |
@@ -45,13 +45,13 @@ used by the Linux and VR streaming core. The native bridge adapts the shared
 packet reassembler and its statistics to Swift. Protocol constants and message
 IDs in `Core/ProtocolConstants.swift` are generated from the C wire headers by
 `python3 tools/generate-wire.py`; the portable checks verify they are current.
-The app does not duplicate the authentication KDF/proof implementation in
-Swift. The historical `NetDisplay-v5-*` crypto domain labels are retained
-because the v6 server uses them; changing them would break interoperability.
+The app does not duplicate the key exchange, key derivation or message sealing
+in Swift: `src/crypto.c` implements them for every platform, and
+`Native/NDNative.c` wraps them as one session object for the app.
 
 ### Deliberate low-latency boundaries
 
-The app advertises the optional v6 prediction capability. Upgraded senders default
+The app advertises the optional prediction capability. Upgraded senders default
 to one keyframe and two P-frames (`keyframe_interval=3`); old senders still work
 with their all-intra stream. At most three compressed access units wait for
 decode. Required reference frames are decoded in order, while a new keyframe
@@ -123,7 +123,7 @@ The app's minimum deployment target is 17.0, but use Xcode 16 or newer for the s
 bash ios/scripts/test.sh
 ```
 
-Tests cover v6 packing, field validation, AVC/HEVC Annex-B parsing, quaternion coordinate changes, encrypted fragmentation/reassembly, tamper rejection, and real Swift -> C HMAC -> Python motion interoperability over a loopback UDP socket. The script's final Swift pass parses iOS source syntax only; it does not typecheck against the Apple SDK on Linux. The full `xcodebuild` step is separate. An optional Linux GUI smoke test is available as `xvfb-run -a python3 ios/Tests/demo_smoke.py` when tkinter and Xvfb are installed.
+Tests cover v7 packing, the session wrapper against the source side of the handshake, field validation, AVC/HEVC Annex-B parsing, quaternion coordinate changes, encrypted fragmentation/reassembly, tamper rejection, and real Swift -> C HMAC -> Python motion interoperability over a loopback UDP socket. The script's final Swift pass parses iOS source syntax only; it does not typecheck against the Apple SDK on Linux. The full `xcodebuild` step is separate. An optional Linux GUI smoke test is available as `xvfb-run -a python3 ios/Tests/demo_smoke.py` when tkinter and Xvfb are installed.
 
 ## Files
 
@@ -160,7 +160,7 @@ provides it. This does not add a software keyboard, mouse emulation or Pencil
 hover/tilt forwarding.
 
 Set `input_enabled=1` on the server and allow its service user to open
-`/dev/uinput`. The optional v6 `TOUCHSCREEN` capability (bit 6, alongside input
+`/dev/uinput`. The optional `TOUCHSCREEN` capability (bit 6, alongside input
 bit 0) must be acknowledged; older hosts remain video-only and show a notice.
 Input device 3 is a direct type-B touchscreen with ten slots and 0…65535 X/Y.
 Each touch frame ends with SYN_REPORT; negative tracking ID ends a contact.

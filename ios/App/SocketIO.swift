@@ -122,12 +122,33 @@ enum SocketIO {
         }
         return result
     }
-    static func readMessage(_ fd: Int32) throws -> ControlMessage {
-        let header = try ControlMessage.decodeHeader(readExact(fd, count: 12))
-        return ControlMessage(rawType: header.type, payload: try readExact(fd, count: header.count))
+    /// After authentication every message is sealed; pass the session from then on.
+    static func readMessage(_ fd: Int32, session: OpaquePointer? = nil) throws -> ControlMessage {
+        let rawHeader = try readExact(fd, count: 12)
+        guard let session = session else {
+            let header = try ControlMessage.decodeHeader(rawHeader)
+            return ControlMessage(rawType: header.type, payload: try readExact(fd, count: header.count))
+        }
+        let header = try ControlMessage.decodeHeader(rawHeader, limit: NDProtocol.maxWire)
+        guard header.type == ControlType.sealed.rawValue else {
+            throw NDError.message("Server sent an unprotected message on an authenticated connection")
+        }
+        let head = [UInt8](rawHeader), body = [UInt8](try readExact(fd, count: header.count))
+        var type: UInt16 = 0
+        var payload = [UInt8](repeating: 0, count: NDProtocol.maxPayload)
+        let count = nd_ios_session_open(session, head, body, body.count, &type, &payload, payload.count)
+        guard count >= 0 else { throw NDError.message("Control message failed authentication") }
+        return ControlMessage(rawType: type, payload: Data(payload.prefix(Int(count))))
     }
-    static func sendMessage(_ fd: Int32, _ m: ControlMessage) throws {
-        let bytes = m.encoded
+    static func sendMessage(_ fd: Int32, _ m: ControlMessage, session: OpaquePointer? = nil) throws {
+        var bytes = m.encoded
+        if let session = session {
+            let payload = [UInt8](m.payload)
+            var sealed = [UInt8](repeating: 0, count: 12 + NDProtocol.maxWire)
+            let count = nd_ios_session_seal(session, m.type, payload, payload.count, &sealed, sealed.count)
+            guard count >= 0 else { throw NDError.message("Cannot seal control message") }
+            bytes = Data(sealed.prefix(Int(count)))
+        }
         try bytes.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
             var offset = 0
             while offset < p.count {

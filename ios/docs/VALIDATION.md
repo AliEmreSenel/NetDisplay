@@ -6,7 +6,7 @@ Package prepared on **2026-10-03** against the user's uploaded `NetDisplay-maste
 
 - Archive Git snapshot: `b4f2713b3adb24ba6e875cd9a46f908c3d03dfb2`.
 - Input ZIP SHA-256: `425a8ef83723a53e1385c831a8a9d07d9f087ed7eada8bc3f44510ba52db4da9`.
-- Control protocol: **v6**.
+- Control protocol: **v7**.
 - Minimum iOS deployment target: **17.0**, real arm64 iPhones.
 - All **58 original uploaded files** were compared byte-for-byte and left unchanged. The package adds iOS source, supporting Linux tools, documentation, and a separate GitHub workflow.
 
@@ -18,7 +18,7 @@ Package prepared on **2026-10-03** against the user's uploaded `NetDisplay-maste
 | C reassembler plus original `src/crypto.c` compiled and executed | PASS, 52 assertions including fragmentation, out-of-order delivery, duplicates, replacement, session filtering, sequence wrap, encryption round-trip, and modified-tag rejection |
 | Malformed UDP input trials | PASS, 20,000 generated malformed datagrams |
 | AddressSanitizer + UndefinedBehaviorSanitizer on native wrapper/test | PASS with leak detection; no reported sanitizer failure |
-| Independent Python crypto vectors | PASS, BLAKE2b client/server proof and stream-key vectors independently reproduced |
+| Independent Python crypto vectors | PASS, BLAKE2b stream-key vector independently reproduced; the VR control test implements the whole CPace handshake and sealed channel independently |
 | Swift -> C -> Python motion wire interoperability | PASS, 96-byte Swift body + C HMAC -> Python validation of the 128-byte packet |
 | UDP loopback/replay rejection | PASS using actual local UDP sockets |
 | Python stereo renderer GUI | PASS under Xvfb: launched Tk window, accepted an authenticated motion sample, drew stereo geometry, and exited cleanly |
@@ -55,7 +55,7 @@ This is a complete implementation source package with portable tests, **not a ha
 2. IPA is signed/installed locally, Developer Mode/trust completed, and the app launches.
 3. Local Network and Motion permissions are granted.
 4. Calibration grid renders in both orientations; local room responds correctly to yaw/pitch/roll; recenter works.
-5. Video handshake succeeds against the v6 server with the intended password/key/encryption policy.
+5. Video handshake succeeds against the v7 server with the intended password/key/encryption policy.
 6. The local IP shown by the app is the cable-network peer; source content appears on the expected headless output.
 7. H.264 at 1280x720@60 decodes in hardware; the stream remains responsive during desktop changes.
 8. The Linux receiver accepts the copied motion token; invalid tokens are rejected.

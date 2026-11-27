@@ -13,9 +13,8 @@ ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'tools'/'ios'))
 from motion_protocol import BODY,PACKET_SIZE,Receiver,decode_packet
 build=Path(sys.argv[1])
-key=bytes(range(32));cn=bytes(range(16));sn=bytes(range(16,32))
-expected={role:hashlib.blake2b(b'NetDisplay-v5-auth'+role.encode()+cn+sn,key=key,digest_size=32).hexdigest() for role in ('client','server')}
-expected['stream']=hashlib.blake2b(b'NetDisplay-v5-video'+cn+sn+(0x0102030405060708).to_bytes(8,'big'),key=key,digest_size=32).hexdigest()
+key=bytes(range(32))
+expected={'stream':hashlib.blake2b(b'NetDisplay-v7-video'+(0x0102030405060708).to_bytes(8,'big'),key=key,digest_size=32).hexdigest()}
 actual=dict(line.split() for line in (build/'crypto-vectors.txt').read_text().splitlines())
 assert actual==expected, 'Original C crypto does not match independent BLAKE2b vectors'
 packet=(build/'motion-packet.bin').read_bytes()

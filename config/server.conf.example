@@ -36,8 +36,10 @@ bitrate_kbps=20000
 keyframe_interval=3
 
 # A password key makes interactive clients prompt when they connect. Generate
-# it by running `netdisplay-server --derive-password-key`; the password itself
-# is neither stored here nor sent over the network.
+# it by running `netdisplay-server --derive-password-key`, which prints a random
+# salt and the key derived from it as SALT:KEY. The password itself is neither
+# stored here nor sent over the network, and the handshake reveals nothing an
+# eavesdropper could test password guesses against.
 password_key=
 
 # For unattended clients, use a PSK file instead of password. A PSK file
@@ -63,11 +65,13 @@ input_enabled=0
 # ND_DISPLAY_ID ND_VIDEO_PORT ND_CONTROL_PORT ND_WIDTH ND_HEIGHT ND_REFRESH_HZ
 # ND_TOUCH_DEVICE (nonempty on the first display of a direct-touch session).
 # Bind that device to its streamed output, so taps do not hit another monitor.
-# Hyprland's current live configuration API is Lua. Remove only this session's
-# exact output name first so a stale connector left by a crashed/restarted
-# daemon cannot make `output create` fail with "Name already taken".
-connect_cmd=hyprctl output remove "$ND_OUTPUT" >/dev/null 2>&1 || true; hyprctl output create headless "$ND_OUTPUT" && hyprctl eval "hl.monitor({ output = '$ND_OUTPUT', mode = '${ND_WIDTH}x${ND_HEIGHT}@${ND_REFRESH_HZ}', position = 'auto', scale = 1 })" && { [ -z "$ND_TOUCH_DEVICE" ] || hyprctl eval "hl.device({ name = '$ND_TOUCH_DEVICE', output = '$ND_OUTPUT' })"; }
-disconnect_cmd=hyprctl output remove "$ND_OUTPUT"
+# disconnect_cmd also runs at startup, with ND_STALE=1, for every leftover
+# "<output>-..." output from a server that did not exit cleanly.
+# Hyprland's current live configuration API is Lua. q runs hyprctl and keeps
+# its routine "ok" reply out of the log while still logging errors. The exact
+# output name is removed first in case a crash left it behind.
+connect_cmd=q() { r=$("$@"); s=$?; case $r in ''|ok) ;; *) printf '%s\n' "$r" >&2;; esac; return $s; }; hyprctl output remove "$ND_OUTPUT" >/dev/null 2>&1 || true; q hyprctl output create headless "$ND_OUTPUT" && q hyprctl eval "hl.monitor({ output = '$ND_OUTPUT', mode = '${ND_WIDTH}x${ND_HEIGHT}@${ND_REFRESH_HZ}', position = 'auto', scale = 1 })" && { [ -z "$ND_TOUCH_DEVICE" ] || q hyprctl eval "hl.device({ name = '$ND_TOUCH_DEVICE', output = '$ND_OUTPUT' })"; }
+disconnect_cmd=r=$(hyprctl output remove "$ND_OUTPUT"); s=$?; case $r in ''|ok) ;; *) printf '%s\n' "$r" >&2;; esac; exit $s
 
 # Mirror receiver batteries and chargers as native device-scoped power supplies.
 # Requires the optional netdisplay-power DKMS module; otherwise video still works.

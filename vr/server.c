@@ -63,7 +63,8 @@ int main(int argc, char **argv) {
   if (argc == 2 && !strcmp(argv[1], "--help")) {
     puts("netdisplay-vr-server BIND PEER CONTROL_PORT VIDEO_PORT WIDTH HEIGHT "
          "FPS KEY_FILE AUTH_KIND ENCODER IPC_PATH\nAUTH_KIND: key or password "
-         "(KEY_FILE contains an already-derived 64-hex key).\nUse the "
+         "(for password, KEY_FILE holds the output of netdisplay-server "
+         "--derive-password-key).\nUse the "
          "netdisplay-vr launcher for configuration and SteamVR integration.");
     return 0;
   }
@@ -96,11 +97,17 @@ int main(int argc, char **argv) {
             ND_MAX_BITRATE_KBPS);
     return 2;
   }
-  uint8_t key[32];
-  if (nd_crypto_load_psk(argv[8], key) < 0) {
+  uint8_t key[32], salt[ND_SALT_SIZE];
+  int password = !strcmp(argv[9], "password"), legacy = 0;
+  if ((password ? nd_crypto_load_password_key(argv[8], salt, key, &legacy)
+                : nd_crypto_load_psk(argv[8], key)) < 0) {
     perror("VR video key");
     return 1;
   }
+  if (legacy)
+    fprintf(stderr, "warning: the VR password key uses the salt shared by "
+                    "every NetDisplay install; regenerate it with "
+                    "netdisplay-server --derive-password-key\n");
   struct sockaddr_in local = {.sin_family = AF_INET, .sin_port = htons(port)},
                      peer = {.sin_family = AF_INET,
                              .sin_port = htons(video_port)};
@@ -182,7 +189,9 @@ int main(int argc, char **argv) {
       continue;
     int udp = -1;
     struct nd_video_tx *tx = NULL;
-    uint8_t stream_key[32] = {0};
+    uint8_t stream_key[32] = {0}, video_key[32] = {0};
+    struct nd_channel ch;
+    nd_channel_init(&ch, c);
     if (from.sin_addr.s_addr != peer.sin_addr.s_addr) {
       close(c);
       continue;
@@ -192,7 +201,7 @@ int main(int argc, char **argv) {
     setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     struct ndc_hello hello;
-    if (ndc_recv_expected(c, NDC_HELLO, &hello, sizeof(hello)) < 0)
+    if (ndc_recv_expected(&ch, NDC_HELLO, &hello, sizeof(hello)) < 0)
       goto done;
     uint32_t flags = ntohl(hello.flags),
              mask = ndc_codec_bit(codec);
@@ -201,15 +210,16 @@ int main(int argc, char **argv) {
         !(flags & NDC_FLAG_FRAME_ENCRYPT) || !(flags & NDC_FLAG_AUTH_REQUIRED))
       goto reject;
     struct ndc_challenge challenge;
-    if (nd_session_server_auth(c, &hello, key, !strcmp(argv[9], "password"),
-                               ND_ENCRYPTION_REQUIRED, &challenge) < 0)
+    if (nd_session_server_auth(&ch, &hello, key, password ? salt : NULL,
+                               ND_ENCRYPTION_REQUIRED, &challenge,
+                               video_key) < 0)
       goto done;
     uint32_t selected = ntohl(challenge.flags);
     unsigned effective_interval = (flags & NDC_FLAG_PREDICTED_VIDEO) ? keyframe_interval : 1;
     if (effective_interval > 1) selected |= NDC_FLAG_PREDICTED_VIDEO;
     encoder.keyframe_interval = encoder.frames_since_keyframe = effective_interval;
     struct ndc_display display;
-    if (ndc_recv_expected(c, NDC_DISPLAY, &display, sizeof(display)) < 0)
+    if (ndc_recv_expected(&ch, NDC_DISPLAY, &display, sizeof(display)) < 0)
       goto done;
     if (!ntohl(display.display_id) || ntohs(display.width) != w ||
         ntohs(display.height) != h || ntohs(display.refresh_hz) != fps) {
@@ -220,8 +230,7 @@ int main(int argc, char **argv) {
     nd_crypto_random(&session, sizeof(session));
     if (!session)
       session = 1;
-    nd_crypto_stream_key(stream_key, key, session, hello.nonce,
-                         challenge.nonce);
+    nd_crypto_stream_key(stream_key, video_key, session);
     struct ndc_welcome welcome = {.flags = htonl(selected),
                                   .display_count = htons(1),
                                   .video_codec = htons(codec)};
@@ -232,11 +241,11 @@ int main(int argc, char **argv) {
                                 .height = htons(h),
                                 .refresh_hz = htons(fps)};
     strcpy(stream.output, "netdisplay-vr-stereo");
-    if (ndc_send_msg(c, NDC_WELCOME, &welcome, sizeof(welcome)) < 0 ||
-        ndc_send_msg(c, NDC_STREAM, &stream, sizeof(stream)) < 0)
+    if (ndc_send_msg(&ch, NDC_WELCOME, &welcome, sizeof(welcome)) < 0 ||
+        ndc_send_msg(&ch, NDC_STREAM, &stream, sizeof(stream)) < 0)
       goto done;
     struct ndc_stream_ready ack;
-    if (ndc_recv_expected(c, NDC_STREAM_READY, &ack, sizeof(ack)) < 0 ||
+    if (ndc_recv_expected(&ch, NDC_STREAM_READY, &ack, sizeof(ack)) < 0 ||
         ack.display_id != display.display_id)
       goto done;
     udp = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
@@ -268,10 +277,10 @@ int main(int argc, char **argv) {
         uint8_t payload[NDC_MAX_PAYLOAD];
         uint16_t type;
         uint32_t bytes = sizeof(payload);
-        if (ndc_recv_msg(c, &type, payload, &bytes) != 1)
+        if (ndc_recv_msg(&ch, &type, payload, &bytes) != 1)
           break;
         if (type == NDC_PING && !bytes) {
-          if (ndc_send_msg(c, NDC_PONG, NULL, 0) < 0)
+          if (ndc_send_msg(&ch, NDC_PONG, NULL, 0) < 0)
             break;
           last_control = nd_now_ns();
         } else if (type == NDC_STOP)
@@ -350,12 +359,14 @@ int main(int argc, char **argv) {
     }
     goto done;
   reject:
-    (void)ndc_send_msg(c, NDC_REJECT, NULL, 0);
+    (void)ndc_send_msg(&ch, NDC_REJECT, NULL, 0);
     fprintf(stderr, "VR connection rejected: authentication, encryption, codec "
                     "or mode mismatch\n");
   done:
     nd_video_tx_close(tx);
     sodium_memzero(stream_key, sizeof(stream_key));
+    sodium_memzero(video_key, sizeof(video_key));
+    nd_channel_clear(&ch);
     if (udp >= 0)
       close(udp);
     close(c);
@@ -373,6 +384,7 @@ int main(int argc, char **argv) {
   av_frame_free(&hw_frame);
   nd_encoder_close(&encoder);
   sodium_memzero(key, sizeof(key));
+  sodium_memzero(salt, sizeof(salt));
   close(listener);
   return 0;
 }

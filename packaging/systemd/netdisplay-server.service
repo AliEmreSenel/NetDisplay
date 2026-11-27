@@ -2,12 +2,22 @@
 Description=NetDisplay integrated source server
 After=graphical-session.target
 PartOf=graphical-session.target
+# The server exits whenever its compositor goes away and keeps exiting until
+# the new session exports its environment, so never stop retrying.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/netdisplay-server %h/.config/netdisplay/server.conf
 Restart=always
 RestartSec=1
+# Back off to 10 s while the compositor stays unavailable (systemd 254+).
+RestartSteps=5
+RestartMaxDelaySec=10
+# SIGTERM goes to the server alone, which stops its senders and runs each
+# session's disconnect_cmd before exiting.
+KillMode=mixed
+TimeoutStopSec=30
 
 [Install]
 WantedBy=graphical-session.target

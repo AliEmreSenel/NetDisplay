@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "common.h"
 #include "power_state.h"
+#include "session.h"
 #include <pthread.h>
 #include <sys/stat.h>
 
@@ -26,18 +27,25 @@ static void directory(const char *root, const char *path) {
   CHECK(mkdir(name, 0700) == 0);
 }
 struct sender {
-  int fd;
+  struct nd_channel ch;
   const struct nd_power_snapshot *snapshot;
 };
 static void *send_snapshot(void *opaque) {
   struct sender *s = opaque;
-  CHECK(nd_power_send(s->fd, s->snapshot) == 0);
+  CHECK(nd_power_send(&s->ch, s->snapshot) == 0);
   return NULL;
 }
+/* Telemetry travels over a sealed session like every other message. */
 static struct nd_power_snapshot *roundtrip(const struct nd_power_snapshot *s) {
   int fds[2];
   CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
-  struct sender tx = {.fd = fds[0], .snapshot = s};
+  struct sender tx = {.snapshot = s};
+  struct nd_channel receiver;
+  nd_channel_init(&tx.ch, fds[0]);
+  nd_channel_init(&receiver, fds[1]);
+  memset(tx.ch.tx_key, 7, sizeof(tx.ch.tx_key));
+  memset(receiver.rx_key, 7, sizeof(receiver.rx_key));
+  tx.ch.sealed = receiver.sealed = 1;
   pthread_t thread;
   CHECK(pthread_create(&thread, NULL, send_snapshot, &tx) == 0);
   struct nd_power_rx rx = {0};
@@ -46,7 +54,7 @@ static struct nd_power_snapshot *roundtrip(const struct nd_power_snapshot *s) {
     uint8_t buf[NDC_MAX_PAYLOAD];
     uint32_t len = sizeof(buf);
     uint16_t type;
-    CHECK(ndc_recv_msg(fds[1], &type, buf, &len) > 0);
+    CHECK(ndc_recv_msg(&receiver, &type, buf, &len) > 0);
     CHECK(nd_power_receive(&rx, type, buf, len, &got) >= 0);
   }
   CHECK(!rx.pending);

@@ -54,10 +54,11 @@ final class StreamConnection {
         var receiver: UDPReceiver?
         var decoder: VideoDecoder?
         var key = [UInt8]()
+        var session: OpaquePointer?
         var finalError: String?
         defer {
             inputLock.lock(); inputAllowed = false; pendingInput.removeAll(); inputLock.unlock()
-            receiver?.stop(); decoder?.stop(); Crypto.wipe(&key)
+            receiver?.stop(); decoder?.stop(); Crypto.wipe(&key); nd_ios_session_destroy(session)
             if fd >= 0 { lifetime.finish(fd) }
             let problem = lifetime.isCancelled ? nil : finalError
             DispatchQueue.main.async { [weak self] in self?.onEnded?(problem) }
@@ -65,22 +66,25 @@ final class StreamConnection {
         do {
             try settings.validate()
             guard nd_ios_init() >= 0 else { throw NDError.message("Cryptographic initialization failed") }
-            if settings.authMode == .password { status("Deriving password key"); key = try Crypto.passwordKey(secret) }
-            else if settings.authMode == .key { key = try Crypto.parseKey(secret) }
+            if settings.authMode == .key { key = try Crypto.parseKey(secret) }
+            let haveKey = settings.authMode != .none
             status("Connecting")
             fd = try SocketIO.connectTCP(host: settings.host, port: UInt16(settings.controlPort), lifetime: lifetime)
             let localIP = try SocketIO.localIP(fd)
             let cn = Crypto.random(NDProtocol.nonceSize)
             var codecMask: UInt32 = VideoCodecs.h264
             if settings.allowHEVC && VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) { codecMask |= VideoCodecs.hevc }
-            try SocketIO.sendMessage(fd, ControlMessage(.hello, Wire.hello(nonce: Data(cn),
-                encrypt: settings.encryptVideo, haveKey: !key.isEmpty, codecs: codecMask, touch: settings.viewerPurpose == .touch)))
+            let hello = Wire.hello(nonce: Data(cn), encrypt: settings.encryptVideo, haveKey: haveKey,
+                codecs: codecMask, touch: settings.viewerPurpose == .touch)
+            try SocketIO.sendMessage(fd, ControlMessage(.hello, hello))
             let challenge = try SocketIO.readMessage(fd)
-            try challenge.require(.challenge, size: 20)
+            try challenge.require(.challenge, size: 4 + NDProtocol.nonceSize + NDProtocol.saltSize + NDProtocol.shareSize)
             var cr = ByteReader(challenge.payload)
-            let flags = try cr.u32(), sn = Array(try cr.take(NDProtocol.nonceSize))
+            let flags = try cr.u32()
+            _ = try cr.take(NDProtocol.nonceSize)
+            let salt = Array(try cr.take(NDProtocol.saltSize))
             let requiresAuth = (flags & ControlFlags.authRequired) != 0, usesPassword = (flags & ControlFlags.password) != 0
-            guard requiresAuth == !key.isEmpty else {
+            guard requiresAuth == haveKey else {
                 throw NDError.message(requiresAuth ? "Server requires authentication; enter its password/key" : "Server is unauthenticated; explicitly select No authentication or secure the server")
             }
             guard ((flags & ControlFlags.frameEncrypt) != 0) == settings.encryptVideo else { throw NDError.message("Server/client video encryption settings do not match") }
@@ -88,18 +92,26 @@ final class StreamConnection {
                 throw NDError.message("Server uses a PSK, not a password. Select 32-byte key (hex).")
             }
             if requiresAuth {
+                if settings.authMode == .password {
+                    status("Deriving password key"); key = try Crypto.passwordKey(secret, salt: salt)
+                }
                 status("Authenticating server")
-                let proof = Crypto.proof(key: key, role: "client", client: cn, server: sn)
-                try SocketIO.sendMessage(fd, ControlMessage(.auth, Data(proof)))
-                let answer = try SocketIO.readMessage(fd); try answer.require(.auth, size: 32)
-                let expected = Crypto.proof(key: key, role: "server", client: cn, server: sn)
-                guard nd_crypto_verify(Array(answer.payload), expected) == 1 else { throw NDError.message("Server authentication failed") }
+                // A password-authenticated key exchange: neither an eavesdropper nor an
+                // impostor server can test password guesses offline.
+                var auth = [UInt8](repeating: 0, count: NDProtocol.shareSize + NDProtocol.authSize)
+                let helloBytes = [UInt8](hello), challengeBytes = [UInt8](challenge.payload)
+                session = nd_ios_session_create(key, helloBytes, helloBytes.count, challengeBytes, challengeBytes.count, &auth)
+                guard session != nil else { throw NDError.message("Server sent an invalid key exchange") }
+                try SocketIO.sendMessage(fd, ControlMessage(.auth, Data(auth)))
+                let answer = try SocketIO.readMessage(fd); try answer.require(.auth, size: NDProtocol.authSize)
+                let proof = [UInt8](answer.payload)
+                guard nd_ios_session_verify(session, proof, proof.count) == 1 else { throw NDError.message("Server authentication failed") }
             }
             let (width, height) = settings.dimensions
             try SocketIO.sendMessage(fd, ControlMessage(.display,
-                Wire.display(width: width, height: height, fps: UInt16(settings.fps))))
+                Wire.display(width: width, height: height, fps: UInt16(settings.fps))), session: session)
             status(settings.viewerPurpose == .vr ? "Negotiating VR video" : "Negotiating video / creating Hyprland output")
-            let welcome = try SocketIO.readMessage(fd); try welcome.require(.welcome, size: 8)
+            let welcome = try SocketIO.readMessage(fd, session: session); try welcome.require(.welcome, size: 8)
             var wr = ByteReader(welcome.payload)
             let selectedFlags = try wr.u32(), count = try wr.u16(), codec = try wr.u16()
             guard count == 1, codec == VideoCodec.h264.rawValue ||
@@ -108,37 +120,40 @@ final class StreamConnection {
                   selectedFlags & ControlFlags.networkTest == 0 else { throw NDError.message("Unsupported server negotiation") }
             let touchFlags = ControlFlags.inputAllowed | ControlFlags.touchscreen
             let touchAllowed = settings.viewerPurpose == .touch && selectedFlags & touchFlags == touchFlags
-            let streamMessage = try SocketIO.readMessage(fd); try streamMessage.require(.stream, size: 84)
+            let streamMessage = try SocketIO.readMessage(fd, session: session); try streamMessage.require(.stream, size: 84)
             let stream = try StreamDescription(streamMessage.payload)
             guard stream.width == width, stream.height == height, stream.fps == UInt16(settings.fps) else {
                 throw NDError.message("Server changed the requested display mode")
             }
-            var streamKey: [UInt8]? = settings.encryptVideo
-                ? Crypto.streamKey(key: key, session: stream.sessionID, client: cn, server: sn) : nil
+            var streamKey: [UInt8]? = nil
+            if settings.encryptVideo {
+                guard let session = session else { throw NDError.message("Video encryption requires authentication") }
+                streamKey = Crypto.streamKey(session: session, streamID: stream.sessionID)
+            }
             defer { if streamKey != nil { Crypto.wipe(&streamKey!) } }
             let video = VideoDecoder(hevc: codec == VideoCodec.hevc.rawValue, width: stream.width, height: stream.height, fps: stream.fps,
                 frames: frames, generation: generation, diagnostics: diagnostics)
             decoder = video
             receiver = try UDPReceiver(localIP: localIP, host: settings.host, port: stream.port,
                 session: stream.sessionID, key: streamKey, diagnostics: diagnostics) { [weak video] in video?.submit($0) }
-            try SocketIO.sendMessage(fd, ControlMessage(.streamReady, Wire.streamReady()))
+            try SocketIO.sendMessage(fd, ControlMessage(.streamReady, Wire.streamReady()), session: session)
             SocketIO.timeout(fd, seconds: 5)
             let info = ConnectedInfo(localIP: localIP, stream: stream, codec: codec == VideoCodec.hevc.rawValue ? "HEVC" : "H.264", encrypted: settings.encryptVideo, touchAllowed: touchAllowed)
             inputLock.lock(); inputAllowed = touchAllowed; inputLock.unlock()
             DispatchQueue.main.async { [weak self] in self?.onConnected?(info) }
             var pingTime: UInt64 = 0, lastPing: UInt64 = 0, lastPong = nd_ios_now_ns()
             while !lifetime.isCancelled {
-                for message in takeInput() { try SocketIO.sendMessage(fd, message) }
+                for message in takeInput() { try SocketIO.sendMessage(fd, message, session: session) }
                 let now = nd_ios_now_ns()
                 if now - lastPing >= 1_000_000_000 && pingTime == 0 {
-                    try SocketIO.sendMessage(fd, ControlMessage(.ping)); pingTime = now; lastPing = now
+                    try SocketIO.sendMessage(fd, ControlMessage(.ping), session: session); pingTime = now; lastPing = now
                 }
                 if now - lastPong > 10_000_000_000 { throw NDError.message("Server heartbeat timed out") }
                 var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
                 let ready = Darwin.poll(&p, 1, 8)
                 if ready < 0 { if errno == EINTR { continue }; throw SocketIO.error("Control poll") }
                 if ready == 0 { continue }
-                let message = try SocketIO.readMessage(fd)
+                let message = try SocketIO.readMessage(fd, session: session)
                 switch message.type {
                 case ControlType.pong.rawValue:
                     guard message.payload.isEmpty else { throw NDError.message("Invalid PONG") }
@@ -146,7 +161,7 @@ final class StreamConnection {
                     if pingTime != 0 { diagnostics.update { $0.tcpRTTMS = Double(lastPong - pingTime) / 1e6 }; pingTime = 0 }
                 case ControlType.ping.rawValue:
                     guard message.payload.isEmpty else { throw NDError.message("Invalid PING") }
-                    try SocketIO.sendMessage(fd, ControlMessage(.pong))
+                    try SocketIO.sendMessage(fd, ControlMessage(.pong), session: session)
                 case ControlType.displayState.rawValue:
                     // Deliberately do not remotely change iPhone brightness or lock state.
                     guard message.payload.count == 8 else { throw NDError.message("Invalid display state") }

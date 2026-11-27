@@ -2,12 +2,24 @@
 #define _GNU_SOURCE
 #include "common.h"
 #include "input_receiver.h"
+#include "session.h"
 #include <linux/uinput.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/syscall.h>
+
+/* The guest is linked without libsodium or the session layer. Its session
+ * is never sealed, so plaintext framing is the whole transport. */
+int ndc_send_msg(struct nd_channel *ch, uint16_t type, const void *payload,
+                 uint32_t len) {
+  if (ch->sealed) {
+    errno = ENOSYS;
+    return -1;
+  }
+  return ndc_send_plain(ch->fd, type, payload, len);
+}
 
 static void finish(int ok) {
   puts(ok ? "NETDISPLAY INPUT VM PASS" : "NETDISPLAY INPUT VM FAIL");
@@ -73,7 +85,7 @@ static int expect(int fd, uint16_t type, uint16_t code, int value,
     struct ndc_input input;
     uint32_t length = sizeof(input);
     uint16_t message;
-    if (ndc_recv_msg(fd, &message, &input, &length) <= 0)
+    if (ndc_recv_plain(fd, &message, &input, &length) <= 0)
       return 0;
     CHECK(message == NDC_INPUT && length == sizeof(input));
     if (ntohs(input.type) == type && ntohs(input.code) == code &&
@@ -111,7 +123,8 @@ int main(void) {
                    sizeof(timeout)) == 0);
   struct nd_input_context input;
   CHECK(nd_input_start(&input, 1) == 0);
-  nd_input_session(&input, sockets[0], 1);
+  struct nd_channel channel = {.fd = sockets[0]};
+  nd_input_session(&input, &channel, 1);
   usleep(200000);
   CHECK(atomic_load(&input.running));
   int keyboard = create_device(1);
@@ -161,7 +174,7 @@ int main(void) {
   event(second, EV_KEY, KEY_C, 0);
   CHECK(expect(sockets[1], EV_KEY, KEY_C, 0, 2000));
   /* The local exit shortcut must work even when forwarding is disabled. */
-  nd_input_session(&input, sockets[0], 0);
+  nd_input_session(&input, &channel, 0);
   usleep(200000);
   for (int i = 0; i < 4; i++) {
     event(second, EV_KEY, KEY_ESC, 1);
@@ -170,14 +183,14 @@ int main(void) {
   usleep(200000);
   CHECK(!atomic_load(&input.quit));
   /* Reconnection must not erase four already completed local presses. */
-  nd_input_session(&input, -1, 0);
+  nd_input_session(&input, NULL, 0);
   usleep(200000);
   event(second, EV_KEY, KEY_ESC, 1);
   event(second, EV_KEY, KEY_ESC, 0);
   for (int i = 0; i < 50 && atomic_load(&input.running); i++)
     usleep(100000);
   CHECK(atomic_load(&input.quit) && !atomic_load(&input.running));
-  nd_input_session(&input, -1, 0);
+  nd_input_session(&input, NULL, 0);
   nd_input_stop(&input);
   close(second);
   close(sockets[0]);

@@ -31,7 +31,7 @@ for path in (root/'App'/'Assets.xcassets').rglob('Contents.json'):
     content=json.loads(path.read_text())
     for image in content.get('images',[]):
         if 'filename' in image: assert (path.parent/image['filename']).is_file()
-assert re.search(r'#define\s+NDC_VERSION\s+6u', (root.parent/'src'/'control_proto.h').read_text())
+assert re.search(r'#define\s+NDC_VERSION\s+7u', (root.parent/'src'/'control_proto.h').read_text())
 assert 'sendmmsg' not in (root/'Native'/'NDNative.c').read_text()
 assert 'workflow_dispatch:' in (root.parent/'.github'/'workflows'/'ios.yml').read_text()
 assert 'secrets.' not in (root.parent/'.github'/'workflows'/'ios.yml').read_text()

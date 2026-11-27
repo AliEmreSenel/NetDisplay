@@ -26,7 +26,7 @@ Enter the Linux-side tether-interface address, not the phone gateway. Grant NetD
 
 ## Protocol v5 error
 
-The app is explicitly protocol v6. Update the server to the supplied source snapshot. An older binary from a public launcher or old systemd service may still be running even if the repository contains newer sources. Check which binary/service you started and its log. Do not remove protocol checks to make an old server appear compatible.
+The app is explicitly protocol v7. Update the server to the supplied source snapshot. An older binary from a public launcher or old systemd service may still be running even if the repository contains newer sources. Check which binary/service you started and its log. Do not remove protocol checks to make an old server appear compatible.
 
 ## Authentication or encryption rejected
 

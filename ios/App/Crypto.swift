@@ -15,22 +15,19 @@ enum Crypto {
         }
         return key
     }
-    static func passwordKey(_ text: String) throws -> [UInt8] {
+    /// The salt comes from the server's CHALLENGE, so each server derives its own key.
+    static func passwordKey(_ text: String, salt: [UInt8]) throws -> [UInt8] {
         guard !text.isEmpty, !text.utf8.contains(0) else { throw NDError.message("Enter the server password") }
+        guard salt.count == NDProtocol.saltSize else { throw NDError.message("Invalid password salt from server") }
         var key = [UInt8](repeating: 0, count: 32)
-        guard text.withCString({ nd_crypto_password_key(&key, $0) }) == 0 else {
+        guard text.withCString({ nd_crypto_password_key(&key, $0, salt) }) == 0 else {
             throw NDError.message("Password derivation failed (memory pressure or invalid password)")
         }
         return key
     }
-    static func proof(key: [UInt8], role: String, client: [UInt8], server: [UInt8]) -> [UInt8] {
+    static func streamKey(session: OpaquePointer, streamID: UInt64) -> [UInt8] {
         var result = [UInt8](repeating: 0, count: 32)
-        role.withCString { nd_crypto_proof(&result, key, $0, client, server) }
-        return result
-    }
-    static func streamKey(key: [UInt8], session: UInt64, client: [UInt8], server: [UInt8]) -> [UInt8] {
-        var result = [UInt8](repeating: 0, count: 32)
-        nd_crypto_stream_key(&result, key, session, client, server)
+        nd_ios_session_stream_key(session, streamID, &result)
         return result
     }
     static func authenticatedMotion(_ sample: MotionSample, key: [UInt8]) -> Data {

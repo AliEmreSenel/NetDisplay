@@ -1083,6 +1083,7 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
 
   struct timespec stat0;
   clock_gettime(CLOCK_MONOTONIC, &stat0);
+  const double stat_interval = nd_stats_interval();
   unsigned long long last_complete = 0;
   unsigned long long last_partial = 0;
   unsigned long long last_overwrite = 0;
@@ -1137,7 +1138,7 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
     clock_gettime(CLOCK_MONOTONIC, &now);
     double dt = (double)(now.tv_sec - stat0.tv_sec) +
                 (double)(now.tv_nsec - stat0.tv_nsec) / 1e9;
-    if (dt >= 1.0) {
+    if (stat_interval && dt >= stat_interval) {
       static unsigned long long last_bytes, last_assembly;
       unsigned long long bytes = atomic_load(&stats.complete_bytes);
       unsigned long long assembly = atomic_load(&stats.assembly_ns);
@@ -1155,14 +1156,15 @@ int main_receiver(int port, int fd, int connector_id, int requested_crtc,
       fprintf(stderr,
               "rx %.1f complete/s  displayed %.1f/s  latest-dropped %llu  "
               "partial-dropped %llu  seq-skipped %llu  bad %llu  dup %llu  "
-              "useful %.1f Mbit/s  receive-assembly %.3f ms\n",
+              "useful %.1f Mbit/s  receive-assembly %.3f ms (last %.0f s)\n",
               (complete - last_complete) / dt,
               (displayed - last_displayed) / dt, overwrite - last_overwrite,
               partial - last_partial, skipped_before_decode - last_skipped,
               bad - last_bad, dup - last_dup,
               (bytes - last_bytes) * 8.0 / dt / 1e6,
               complete == last_complete ? 0.0 :
-              (assembly - last_assembly) / 1e6 / (complete - last_complete));
+              (assembly - last_assembly) / 1e6 / (complete - last_complete),
+              dt);
       last_bytes = bytes;
       last_assembly = assembly;
 
