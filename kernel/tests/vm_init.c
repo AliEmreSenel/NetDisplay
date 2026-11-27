@@ -2,11 +2,23 @@
 #define _GNU_SOURCE
 #include "../../src/common.h"
 #include "../../src/power_native.h"
+#include "../../src/session.h"
 #include <dirent.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+
+/* The guest is linked without libsodium or the session layer and never
+ * sends telemetry; this only satisfies power_state.c's sender. */
+int ndc_send_msg(struct nd_channel *ch, uint16_t type, const void *payload,
+                 uint32_t len) {
+  if (ch->sealed) {
+    errno = ENOSYS;
+    return -1;
+  }
+  return ndc_send_plain(ch->fd, type, payload, len);
+}
 
 static void finish(int success) {
   puts(success ? "NETDISPLAY POWER VM PASS" : "NETDISPLAY POWER VM FAIL");
