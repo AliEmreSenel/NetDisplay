@@ -11,6 +11,6 @@ configure:
 test: all
 	ctest --test-dir "$(BUILD_DIR)" --output-on-failure --parallel "$(JOBS)"
 site:
-	NETDISPLAY_BUILD_DIR="$(BUILD_DIR)" NETDISPLAY_JOBS="$(JOBS)" ./build-site.sh
+	./build-site.sh
 clean:
 	cmake --build "$(BUILD_DIR)" --target clean

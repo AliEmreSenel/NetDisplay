@@ -41,12 +41,7 @@ if [ -r /etc/os-release ]; then
     DISTRO_NAME=${PRETTY_NAME:-${NAME:-Linux}}
 fi
 
-case "$(uname -m)" in
-    x86_64|amd64) ARCH=x86_64 ;;
-    aarch64|arm64) ARCH=aarch64 ;;
-    *) ARCH=$(uname -m) ;;
-esac
-say "detected $DISTRO_NAME on $ARCH; mode=$MODE"
+say "detected $DISTRO_NAME on $(uname -m); mode=$MODE"
 
 # With no explicit path, put an editable example in the path the binary reads.
 if [ "$#" -eq 0 ]; then
@@ -171,47 +166,31 @@ install_build_deps() {
 }
 
 TARGET="netdisplay-$MODE"
-BIN="$TMP/$TARGET"
-HAVE_BIN=0
-say "trying prebuilt $MODE for $ARCH"
-if get "$BASE/$TARGET-$ARCH" "$BIN" 2>/dev/null; then
-    chmod +x "$BIN"
-    if "$BIN" --version >/dev/null 2>&1; then
-        say "prebuilt works"
-        HAVE_BIN=1
-    else
-        say "prebuilt is not compatible; building the distributed C source"
-    fi
+say "building $MODE from the distributed C source"
+if ! check_build_deps; then
+    install_build_deps
+    check_build_deps || fail "packages were installed but requirements are still missing:$MISSING"
+fi
+
+SRC="$TMP/source.tar.gz"
+get "$BASE/source.tar.gz" "$SRC" || fail "cannot download source.tar.gz"
+mkdir "$TMP/src"
+tar -xzf "$SRC" -C "$TMP/src"
+if [ "$MODE" = server ]; then
+    BUILD_SERVER=ON
+    BUILD_CLIENT=OFF
 else
-    say "no prebuilt for $ARCH; building the distributed C source"
+    BUILD_SERVER=OFF
+    BUILD_CLIENT=ON
 fi
-
-if [ "$HAVE_BIN" -eq 0 ]; then
-    if ! check_build_deps; then
-        install_build_deps
-        check_build_deps || fail "packages were installed but requirements are still missing:$MISSING"
-    fi
-
-    SRC="$TMP/source.tar.gz"
-    get "$BASE/source.tar.gz" "$SRC" || fail "cannot download source.tar.gz"
-    mkdir "$TMP/src"
-    tar -xzf "$SRC" -C "$TMP/src"
-    if [ "$MODE" = server ]; then
-        BUILD_SERVER=ON
-        BUILD_CLIENT=OFF
-    else
-        BUILD_SERVER=OFF
-        BUILD_CLIENT=ON
-    fi
-    cmake -S "$TMP/src" -B "$TMP/build" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_TESTING=OFF \
-        -DNETDISPLAY_BUILD_SERVER="$BUILD_SERVER" \
-        -DNETDISPLAY_BUILD_CLIENT="$BUILD_CLIENT"
-    cmake --build "$TMP/build" --target "$TARGET" -j"${NETDISPLAY_JOBS:-2}"
-    BIN="$TMP/build/$TARGET"
-    say "local build succeeded"
-fi
+cmake -S "$TMP/src" -B "$TMP/build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING=OFF \
+    -DNETDISPLAY_BUILD_SERVER="$BUILD_SERVER" \
+    -DNETDISPLAY_BUILD_CLIENT="$BUILD_CLIENT"
+cmake --build "$TMP/build" --target "$TARGET" -j"${NETDISPLAY_JOBS:-2}"
+BIN="$TMP/build/$TARGET"
+say "local build succeeded"
 
 if [ "$MODE" = server ] && [ "$DEFAULT_CONFIG" -eq 1 ] &&
    ! grep -Eq '^[[:space:]]*(password_key|psk_file)=[[:space:]]*[^[:space:]]' "$CONFIG"; then

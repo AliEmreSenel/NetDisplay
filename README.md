@@ -27,8 +27,9 @@ On the Hyprland source computer, run:
 curl -fsSL https://nd.myc.li/ | sh -s -- --server
 ```
 
-The launcher tries a prebuilt binary and falls back to compiling the published
-source bundle when necessary. It runs from a temporary directory and creates
+The launcher compiles the published source bundle, installing missing build
+packages through the distro package manager if needed. It runs from a
+temporary directory and creates
 an editable config under
 `${XDG_CONFIG_HOME:-$HOME/.config}/netdisplay/`. A new server config gets a
 random password; the launcher prints it once and stores only its derived key.
@@ -228,8 +229,7 @@ NETDISPLAY_PUBLIC_URL=https://netdisplay.example.com ./build-site.sh
 ```
 
 Serve `dist/` as the document root and return `index.html` for `/`. The
-bundle contains the launcher, source fallback, GPL license, example configs,
-and binaries for the build machine's architecture.
+bundle contains the launcher, source archive, GPL license, and example configs.
 
 Use `NETDISPLAY_SITE_DIR` to change the output directory. During testing, a
 launcher can use another artifact origin without being rebuilt:
@@ -238,15 +238,6 @@ launcher can use another artifact origin without being rebuilt:
 curl -fsSL https://staging.example.com/ | \
   NETDISPLAY_BASE_URL=https://staging.example.com sh
 ```
-
-To build a mostly-static receiver from an existing static-library prefix:
-
-```sh
-NETDISPLAY_STATIC_CLIENT_PREFIX=/path/to/prefix ./build-site.sh
-```
-
-libva, glibc, and the vendor VA driver remain dynamic and come from the
-receiver.
 
 ## Build and test
 

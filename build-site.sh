@@ -2,12 +2,8 @@
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-BUILD=${NETDISPLAY_BUILD_DIR:-"$ROOT/build"}
 SITE=${NETDISPLAY_SITE_DIR:-"$ROOT/dist"}
-JOBS=${NETDISPLAY_JOBS:-2}
 PUBLIC_URL=${NETDISPLAY_PUBLIC_URL:-https://nd.myc.li}
-ARCH=$(uname -m)
-case "$ARCH" in amd64) ARCH=x86_64 ;; arm64) ARCH=aarch64 ;; esac
 
 case "$PUBLIC_URL" in
     http://*|https://*) PUBLIC_URL=${PUBLIC_URL%/} ;;
@@ -18,24 +14,16 @@ if ! printf '%s\n' "$PUBLIC_URL" | grep -Eq '^https?://[A-Za-z0-9._~:/-]+$'; the
     exit 2
 fi
 
-# Reuse the build cache; explicitly reset options shared with install.sh.
-cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_TESTING=OFF \
-    -DNETDISPLAY_BUILD_SERVER=ON -DNETDISPLAY_BUILD_CLIENT=ON \
-    -DNETDISPLAY_BUILD_VR=OFF -DNETDISPLAY_BUILD_STEAMVR=OFF \
-    "-DNETDISPLAY_STATIC_CLIENT_PREFIX=${NETDISPLAY_STATIC_CLIENT_PREFIX:-}"
-cmake --build "$BUILD" --parallel "$JOBS"
-
 mkdir -p "$SITE"
+# Binaries are no longer published; drop any left over from older bundles.
+rm -f "$SITE"/netdisplay-client-* "$SITE"/netdisplay-server-*
 
-cp "$BUILD/netdisplay-client" "$SITE/netdisplay-client-$ARCH"
-cp "$BUILD/netdisplay-server" "$SITE/netdisplay-server-$ARCH"
 escaped_url=$(printf '%s' "$PUBLIC_URL" | sed 's/[\\&|]/\\&/g')
 sed "s|https://nd.myc.li|$escaped_url|g" "$ROOT/site/index.html" > "$SITE/index.html"
 cp "$ROOT/LICENSE" "$SITE/LICENSE"
 cp "$ROOT/config/client.conf.example" "$ROOT/config/server.conf.example" "$SITE/"
 
-# Keep the fallback archive to the files required for a release build.
+# The launcher builds from this archive, so keep it to the release build inputs.
 tar -czf "$SITE/source.tar.gz" -C "$ROOT" LICENSE CMakeLists.txt cmake src protocols kernel/netdisplay_power.h
 
 printf '\nBuilt site directory: %s\n' "$SITE"

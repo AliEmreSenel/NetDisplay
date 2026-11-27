@@ -12,8 +12,6 @@ option(NETDISPLAY_BUILD_SERVER "Build netdisplay-server" ON)
 option(NETDISPLAY_BUILD_CLIENT "Build netdisplay-client" ON)
 option(NETDISPLAY_BUILD_VR "Build the dedicated VR backend and capture layer" OFF)
 option(NETDISPLAY_BUILD_STEAMVR "Build the standalone SteamVR driver" OFF)
-set(NETDISPLAY_STATIC_CLIENT_PREFIX "" CACHE PATH
-    "Optional prefix containing static libavcodec.a, libavutil.a, libswscale.a and libdrm.a")
 
 # Linux device support is separate from the portable protocol and streaming core.
 if(NETDISPLAY_BUILD_SERVER OR NETDISPLAY_BUILD_CLIENT OR BUILD_TESTING)
@@ -68,45 +66,11 @@ if(NETDISPLAY_BUILD_SERVER)
 endif()
 
 if(NETDISPLAY_BUILD_CLIENT)
-    # VA stays dynamic so the client uses the receiver laptop's installed
-    # libva + vendor VA driver.
-    pkg_check_modules(LIBVA REQUIRED IMPORTED_TARGET libva libva-drm)
+    pkg_check_modules(CLIENT REQUIRED IMPORTED_TARGET
+        libdrm libavcodec libavutil libswscale libva libva-drm)
     add_executable(netdisplay-client src/client.c src/video_receiver.c)
     target_link_libraries(netdisplay-client PRIVATE
-        nd_common ${CMAKE_DL_LIBS})
-
-    if(NETDISPLAY_STATIC_CLIENT_PREFIX)
-        find_path(ND_AV_INCLUDE libavcodec/avcodec.h
-            PATHS "${NETDISPLAY_STATIC_CLIENT_PREFIX}/include" NO_DEFAULT_PATH REQUIRED)
-        find_path(ND_DRM_INCLUDE xf86drm.h
-            PATHS "${NETDISPLAY_STATIC_CLIENT_PREFIX}/include/libdrm"
-                  "${NETDISPLAY_STATIC_CLIENT_PREFIX}/include"
-            NO_DEFAULT_PATH REQUIRED)
-        find_file(ND_AVCODEC_A libavcodec.a
-            PATHS "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib"
-                  "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib64"
-            NO_DEFAULT_PATH REQUIRED)
-        find_file(ND_AVUTIL_A libavutil.a
-            PATHS "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib"
-                  "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib64"
-            NO_DEFAULT_PATH REQUIRED)
-        find_file(ND_SWSCALE_A libswscale.a
-            PATHS "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib"
-                  "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib64"
-            NO_DEFAULT_PATH REQUIRED)
-        find_file(ND_DRM_A libdrm.a
-            PATHS "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib"
-                  "${NETDISPLAY_STATIC_CLIENT_PREFIX}/lib64"
-            NO_DEFAULT_PATH REQUIRED)
-        target_include_directories(netdisplay-client PRIVATE "${ND_AV_INCLUDE}" "${ND_DRM_INCLUDE}")
-        target_link_libraries(netdisplay-client PRIVATE
-            "${ND_AVCODEC_A}" "${ND_AVUTIL_A}" "${ND_SWSCALE_A}" "${ND_DRM_A}"
-            PkgConfig::LIBVA m dl rt)
-    else()
-        # Used by the source fallback on an arbitrary receiver laptop.
-        pkg_check_modules(CLIENT REQUIRED IMPORTED_TARGET libdrm libavcodec libavutil libswscale)
-        target_link_libraries(netdisplay-client PRIVATE PkgConfig::CLIENT PkgConfig::LIBVA)
-    endif()
+        nd_common PkgConfig::CLIENT ${CMAKE_DL_LIBS})
 endif()
 
 if(NETDISPLAY_BUILD_STEAMVR)
